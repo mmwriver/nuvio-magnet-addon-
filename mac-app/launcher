@@ -1,0 +1,26 @@
+#!/bin/bash
+# My Magnet Links - macOS app launcher.
+# Runs the bundled magnet_addon.py with the Mac's python3, in the
+# foreground, so quitting this app stops the addon server.
+
+# Resolve this bundle's Resources dir from the launcher's own path.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+RESOURCES="$(cd "$SELF_DIR/../Resources" && pwd)"
+
+# Data lives outside the bundle so saved magnets survive app updates.
+DATA="$HOME/Library/Application Support/My Magnet Links"
+mkdir -p "$DATA"
+
+# One-time migration: adopt magnets saved by the old script version.
+if [ ! -f "$DATA/magnets.json" ]; then
+  OLD="$(find "$HOME/Downloads" "$HOME/Desktop" -name magnets.json 2>/dev/null | head -1)"
+  if [ -n "$OLD" ]; then
+    cp "$OLD" "$DATA/magnets.json"
+  fi
+fi
+
+# Open the configure page once the server has had a moment to start.
+(sleep 1.5; open "http://127.0.0.1:7777/configure") &
+
+PYTHON="$(command -v python3 || echo /usr/bin/python3)"
+exec env MAGNET_ADDON_HOME="$DATA" "$PYTHON" "$RESOURCES/magnet_addon.py"

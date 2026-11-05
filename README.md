@@ -33,6 +33,23 @@ No accounts, no sign-ups, no dependencies — it's a single Python file using on
    http://127.0.0.1:7777/manifest.json
    ```
 
+## Mac app version
+
+Prefer not to use Terminal? The `mac-app` folder holds the pieces of **My Magnet Links.app**, a small Mac app that runs the same addon — double-click it and it starts the addon in the background and opens the magnet page for you. No Terminal needed.
+
+The app bundle is put together like this:
+
+```
+My Magnet Links.app/
+  Contents/
+    Info.plist            (from mac-app/Info.plist)
+    MacOS/launcher        (from mac-app/launcher)
+    Resources/
+      magnet_addon.py     (from mac-app/magnet_addon.py)
+```
+
+Saved magnets live outside the app, in `~/Library/Application Support/My Magnet Links/magnets.json`, so they survive app updates — and the app adopts the magnets you saved with the script version the first time it runs. First launch: right-click the app and choose **Open** (it's unsigned), or allow it under **System Settings → Privacy & Security → Open Anyway**.
+
 ## Adding a magnet link
 
 1. With the addon running, open the first address it printed (the one ending in `/configure`) in your browser.
