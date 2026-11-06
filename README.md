@@ -83,6 +83,7 @@ Repeat plays start fast: the addon remembers each resolved stream address in mem
 ### Fix in 1.6.7
 
 - **Live relay handles TS-layout broadcasts.** Some live broadcasts (LiveNOW's newer ones) lay their playlists out with plain `.ts` segments instead of fMP4 segments. On those, the relay's single-input form stalled — the player sat at "buffering" and nothing ever played. The relay now spots the layout from the playlist itself: fMP4 broadcasts keep the single-input form (picture and sound locked together, as fixed in 1.6.2), and TS broadcasts are fed as the two pinned playlists — video and sound — which starts at once and stays in sync.
+- **Back to the old way of updating.** This release also undoes the 1.6.4 approve-once / self-update restructure, at the owner's order: the app once again runs the script inside the app bundle, and there is no Update button. To update, download the new app and replace the old one, and approve the new build once under System Settings → Privacy & Security → Open Anyway — the way it worked before 1.6.4. Saved lists are unaffected: they live in the Application Support folder (`~/Library/Application Support/My Magnet Links/`) either way, and carry over by themselves.
 
 ### Removed in 1.6.6
 
@@ -92,10 +93,9 @@ Repeat plays start fast: the addon remembers each resolved stream address in mem
 
 - **The app notices a cookies file that appears after it starts.** If the addon started while no cookies file was in Downloads, it used to remember "no cookies" for as long as it ran — so exporting the cookies later changed nothing until the app was restarted, and YouTube streams could come back unavailable. A "not found" answer now only lasts about 30 seconds, and a failed stream lookup searches once more on the spot. Export your cookies whenever; no restart needed.
 
-### New in 1.6.4
+### New in 1.6.4 (reverted in 1.6.7)
 
-- **Approve once, update forever.** Until now every new app version had to be approved again under System Settings → Privacy & Security → Open Anyway, because each rebuild was a brand-new app bundle in macOS's eyes. The app now copies `magnet_addon.py` into the Application Support folder (`~/Library/Application Support/My Magnet Links/`) on its first run and runs it from there — the bundle itself never changes again, so the one approval covers it for good. (Your saved lists were already kept in that folder; now the script lives there too.)
-- **Update button.** The `/configure` page shows the running version and an **Update** button. Pressing it fetches the newest `magnet_addon.py`, checks that it's valid and actually newer, swaps it in, and restarts the app on the new version — this page comes back by itself. Terminal-version users get the same button: it updates their script in place the same way. From here on, new versions install themselves; nobody has to re-approve anything.
+- **Approve once, update forever — tried, then reverted.** 1.6.4 moved the running script into the Application Support folder and added an **Update** button that fetched and installed new versions by itself, so macOS only had to approve the app bundle once. At the owner's order, 1.6.7 goes back to the old way: the app runs the script inside the bundle, each new app build is approved once under System Settings → Privacy & Security → Open Anyway, and updating means downloading the new app and replacing the old one. (The Terminal version likewise goes back to replacing the `magnet_addon.py` file.)
 
 ### New in 1.6.3 (removed again in 1.6.6)
 

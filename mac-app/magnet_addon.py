@@ -70,10 +70,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote, unquote, urljoin
 
 PORT = int(os.environ.get("PORT", "7777"))
-UPDATE_URL = os.environ.get(
-    "MAGNET_UPDATE_URL",
-    "https://raw.githubusercontent.com/mmwriver/nuvio-magnet-addon-/main/magnet_addon.py",
-)
 HERE = os.path.dirname(os.path.abspath(__file__))
 _home = os.environ.get("MAGNET_ADDON_HOME")
 DATA_DIR = _home if _home else HERE
@@ -1090,83 +1086,6 @@ def esc(s):
     )
 
 
-def _fetched_version(text):
-    """The version marker of a magnet_addon.py source text - the same
-    "version" field the manifest carries - or None if there is none."""
-    m = re.search(r'"version"\s*:\s*"([0-9]+(?:\.[0-9]+)*)"', text or "")
-    return m.group(1) if m else None
-
-
-def _version_key(version):
-    return tuple(int(p) for p in version.split("."))
-
-
-def fetch_update():
-    """Fetch the newest magnet_addon.py and install it over the
-    running script's own file - but only when what came back is valid
-    Python carrying a strictly newer version. Returns (new_version,
-    None) on success and (None, reason) otherwise; on any failure the
-    running file is left exactly as it was."""
-    try:
-        req = urllib.request.Request(
-            UPDATE_URL,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/126.0 Safari/537.36"
-                )
-            },
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read()
-    except Exception as e:
-        return None, "Could not fetch the update (%s). Nothing changed." % e
-    try:
-        text = raw.decode("utf-8")
-    except Exception:
-        return None, "The update that came back was not readable text. Nothing changed."
-    new_version = _fetched_version(text)
-    if not new_version:
-        return None, "The update that came back has no version marker. Nothing changed."
-    if _version_key(new_version) <= _version_key(MANIFEST["version"]):
-        return None, (
-            "Already up to date - the newest version out there is %s "
-            "and you are running %s." % (new_version, MANIFEST["version"])
-        )
-    try:
-        compile(text, "magnet_addon.py", "exec")
-    except Exception:
-        return None, "The update that came back is not valid Python. Nothing changed."
-    target = os.path.abspath(__file__)
-    tmp = target + ".update-tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, target)
-    except Exception as e:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-        return None, "Could not write the update (%s). Nothing changed." % e
-    return new_version, None
-
-
-def updated_page(version):
-    return """<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>My Magnet Links</title>
-<meta http-equiv="refresh" content="4;url=/configure">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>body{background:#111;color:#eee;font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:640px;margin:24px auto;padding:0 16px}</style>
-</head><body>
-<h2>Updated to version %s</h2>
-<p>The app is restarting on the new version - this page will reload
-to the configure page in a few seconds.</p>
-<script>setTimeout(function(){ location.replace("/configure"); }, 4000);</script>
-</body></html>""" % esc(version)
-
-
 def configure_page(msg=""):
     with LOCK:
         magnets = load_store(STORE)
@@ -1195,15 +1114,6 @@ It can start a little slower, and seeking is limited.</p>
 the app pulls the live feed itself and hands it to Nuvio as one
 continuous stream.</p>
 """ % options
-    update_form = """<form method="post" action="/update" style="margin-top:28px">
-<label>Updates</label>
-<p style="color:#999;margin:4px 0 8px">You are running version %s.
-Pressing Update fetches the newest version and installs it in place;
-the app restarts itself and this page comes back on the new version.
-Approving the app in macOS Settings is a one-time thing - updates
-through this button never need it again.</p>
-<button type="submit">Update</button>
-</form>""" % MANIFEST["version"]
     channel_form = """<form method="post" action="/addchannel" style="margin-top:28px">
 <label>Name (optional)</label>
 <input name="name" placeholder="Channel name - the real one fills in by itself">
@@ -1302,9 +1212,8 @@ are the same thing, one kind at a time.</p>
 </form>
 %s
 %s
-%s
 <h3>Saved</h3>%s
-</body></html>""" % (PORT, note, quality_form, channel_form, update_form, rows)
+</body></html>""" % (PORT, note, quality_form, channel_form, rows)
     return html
 
 
@@ -1866,30 +1775,6 @@ class Handler(BaseHTTPRequestHandler):
             item = resolve_channel(item, keep_name=bool(name))
             save_channel(item)
             self.redirect("/configure")
-            return
-        if parsed.path == "/update":
-            length = int(self.headers.get("Content-Length") or 0)
-            if length:
-                self.rfile.read(length)
-            new_version, err = fetch_update()
-            if err:
-                self.redirect("/configure?msg=" + quote(err))
-                return
-            self.send_html(updated_page(new_version))
-            try:
-                self.wfile.flush()
-            except Exception:
-                pass
-            self.close_connection = True
-
-            def _restart():
-                time.sleep(0.5)
-                os.execv(
-                    sys.executable,
-                    [sys.executable, os.path.abspath(__file__)] + sys.argv[1:],
-                )
-
-            threading.Thread(target=_restart, daemon=True).start()
             return
         if parsed.path == "/settings":
             length = int(self.headers.get("Content-Length") or 0)
