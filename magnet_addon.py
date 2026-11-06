@@ -165,7 +165,7 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.6.6",
+    "version": "1.6.7",
     "name": "My Magnet Links",
     "description": "Your own pasted magnet links, web video links, YouTube videos and channels, playable in Nuvio.",
     "logo": "",
@@ -631,6 +631,25 @@ def pick_live_variant(master_url):
         if audio_url:
             audio_ord = chosen[2]
     return (best[1], audio_url, best[3], audio_ord)
+
+
+def live_variant_layout(variant_url):
+    """Classify a live variant playlist by its segment layout:
+    True when it is an fMP4 playlist (its segments are named by an
+    #EXT-X-MAP tag), False when it is a plain TS-segment playlist
+    (no #EXT-X-MAP anywhere in it), None when the playlist cannot
+    be fetched. Only the head of the playlist is read - the tag, if
+    present, sits at the top. The relay picks its ffmpeg form by
+    this layout: see handle_live."""
+    try:
+        req = urllib.request.Request(
+            variant_url, headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            text = resp.read(65536).decode("utf-8", "replace")
+    except Exception:
+        return None
+    return "#EXT-X-MAP" in text
 
 
 def resolve_youtube(item):
@@ -1491,23 +1510,43 @@ class Handler(BaseHTTPRequestHandler):
         if not ffmpeg:
             self.redirect_absolute(resolved)
             return
-        # Feed ffmpeg the master playlist as ONE input, mapping the
+        # The ffmpeg form depends on the broadcast's playlist
+        # layout (live_variant_layout on the picked variant):
+        #
+        # fMP4 layout (variant playlists carry an #EXT-X-MAP):
+        # feed ffmpeg the master playlist as ONE input, mapping the
         # best H.264 variant and its audio rendition by their
         # positions in the playlist (pick_live_variant's ordinals).
         # The relay used to feed the variant and audio playlists as
-        # TWO separate inputs - but each input then runs its own
-        # live-playlist cycle, and the two can drift a whole segment
-        # (~5s) apart in what they're actually playing: the picture
-        # and the sound come out of sync (measured +5.03s of skew on
-        # a 90s capture, and a 5.04s hole at the start of the audio
-        # on another). One input means one demuxer serving both
-        # renditions off the same playlist snapshot, so they stay
-        # locked together. If no variant qualifies (or the playlist
-        # can't be read), the master still goes in as one input and
-        # ffmpeg picks the first streams. The audio in these
-        # playlists is ADTS, which an MP4 can't hold as-is - the
-        # aac_adtstoasc bitstream filter rewrites the headers on the
-        # way through (still a copy, no re-encode).
+        # TWO separate inputs - but on this layout each input then
+        # runs its own live-playlist cycle, and the two can drift a
+        # whole segment (~5s) apart in what they're actually
+        # playing: the picture and the sound come out of sync
+        # (measured +5.03s of skew on a 90s capture, and a 5.04s
+        # hole at the start of the audio on another). One input
+        # means one demuxer serving both renditions off the same
+        # playlist snapshot, so they stay locked together.
+        #
+        # TS layout (plain .ts segments, no #EXT-X-MAP - the layout
+        # LiveNOW's newer broadcasts use): the master-as-one-input
+        # form is unusable - ffmpeg stalls enumerating the master's
+        # many variants and produces nothing for tens of seconds, so
+        # the player sits at "buffering" and gives up. Feed the two
+        # PINNED playlists instead: the chosen variant as input 0
+        # and its audio rendition as input 1, each with its own
+        # reconnect flags. These playlists name their segments
+        # directly, ffmpeg starts at once, and because both are
+        # pinned to the same broadcast the renditions stay in step
+        # (measured: both streams starting at 0.000, tail ~0.1s
+        # apart on a 60s capture).
+        #
+        # If the layout can't be determined (or no variant
+        # qualified in the first place), the master still goes in as
+        # one input and ffmpeg picks by position or first streams.
+        # The audio in these playlists is ADTS, which an MP4 can't
+        # hold as-is - the aac_adtstoasc bitstream filter rewrites
+        # the headers on the way through (still a copy, no
+        # re-encode).
         reconnect = [
             "-reconnect",
             "1",
@@ -1517,16 +1556,35 @@ class Handler(BaseHTTPRequestHandler):
             "5",
         ]
         picked = pick_live_variant(resolved)
-        cmd = [ffmpeg, "-v", "error"] + reconnect
+        cmd = [ffmpeg, "-v", "error"]
+        ts_form = False
         if picked:
-            _vurl, _aurl, v_ord, a_ord = picked
-            cmd += ["-i", resolved, "-map", "0:v:%d" % v_ord]
-            if a_ord is not None:
-                cmd += ["-map", "0:a:%d" % a_ord]
+            vurl, aurl, v_ord, a_ord = picked
+            if live_variant_layout(vurl) is False:
+                # TS layout: pinned variant + pinned audio inputs.
+                cmd += reconnect + ["-i", vurl]
+                if aurl:
+                    cmd += reconnect + [
+                        "-i",
+                        aurl,
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0",
+                    ]
+                else:
+                    cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+                ts_form = True
+        if not ts_form:
+            cmd += reconnect
+            if picked:
+                cmd += ["-i", resolved, "-map", "0:v:%d" % v_ord]
+                if a_ord is not None:
+                    cmd += ["-map", "0:a:%d" % a_ord]
+                else:
+                    cmd += ["-map", "0:a:0?"]
             else:
-                cmd += ["-map", "0:a:0?"]
-        else:
-            cmd += ["-i", resolved, "-map", "0:v:0", "-map", "0:a:0?"]
+                cmd += ["-i", resolved, "-map", "0:v:0", "-map", "0:a:0?"]
         cmd += [
             "-c",
             "copy",

@@ -80,6 +80,10 @@ If you add a YouTube video without a name, the addon fills in the video's **real
 
 Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for a minute for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
 
+### Fix in 1.6.7
+
+- **Live relay handles TS-layout broadcasts.** Some live broadcasts (LiveNOW's newer ones) lay their playlists out with plain `.ts` segments instead of fMP4 segments. On those, the relay's single-input form stalled — the player sat at "buffering" and nothing ever played. The relay now spots the layout from the playlist itself: fMP4 broadcasts keep the single-input form (picture and sound locked together, as fixed in 1.6.2), and TS broadcasts are fed as the two pinned playlists — video and sound — which starts at once and stays in sync.
+
 ### Removed in 1.6.6
 
 - **The in-Nuvio Delete entry is gone.** The Delete option added in 1.6.3 as the last entry in every item's stream list has been removed at the owner's call — stream lists are back to just the play streams. To delete something, use the **Delete** links on the configure page, same as before 1.6.3.
