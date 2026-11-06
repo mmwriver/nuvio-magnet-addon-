@@ -160,7 +160,7 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.6.1",
+    "version": "1.6.2",
     "name": "My Magnet Links",
     "description": "Your own pasted magnet links, web video links, YouTube videos and channels, playable in Nuvio.",
     "logo": "",
@@ -534,23 +534,26 @@ def live_master_url(item):
 
 
 def pick_live_variant(master_url):
-    """Pick the (video, audio) playlist pair out of a live master
-    playlist, or None. Fetches the playlist and scans its
-    #EXT-X-STREAM-INF entries for the highest-bandwidth one whose
-    video codec is avc1 (H.264) - the relay copies the stream into an
-    MP4 without re-encoding, and a VP9/AV1 variant would produce a
-    file some players can't handle.
+    """Pick the live relay's variant out of a live master playlist,
+    or None. Fetches the playlist and scans its #EXT-X-STREAM-INF
+    entries for the highest-bandwidth one whose video codec is avc1
+    (H.264) - the relay copies the stream into an MP4 without
+    re-encoding, and a VP9/AV1 variant would produce a file some
+    players can't handle.
 
     The variant playlist alone is NOT enough: YouTube's variant
     playlists carry video only, and the sound lives in a separate
     #EXT-X-MEDIA audio rendition (the group the variant's AUDIO
-    attribute names). So the return is (variant_url, audio_url) -
-    audio_url is the group's DEFAULT rendition (or its first), or
-    None when the master names no audio group. ffmpeg follows both
-    playlists itself, reloading them as new segments appear, which is
-    the whole point of the relay. Any failure - fetch error, no avc1
-    variant - returns None and the caller uses the master URL
-    itself."""
+    attribute names). So the return is (variant_url, audio_url,
+    variant_ordinal, audio_ordinal) - audio_url is the group's
+    DEFAULT rendition (or its first), or None when the master names
+    no audio group. The ordinals are the 0-based positions of the
+    chosen variant among all #EXT-X-STREAM-INF entries and of the
+    chosen rendition among all #EXT-X-MEDIA audio entries: they are
+    how ffmpeg numbers the streams of the master playlist when it is
+    read as ONE input (0:v:N / 0:a:N), which is how the relay feeds
+    it - see handle_live. Any failure - fetch error, no avc1
+    variant - returns None and the caller falls back."""
     try:
         req = urllib.request.Request(
             master_url, headers={"User-Agent": "Mozilla/5.0"}
@@ -560,22 +563,29 @@ def pick_live_variant(master_url):
     except Exception:
         return None
     lines = text.splitlines()
-    audio_groups = {}  # group id -> [(is_default, url), ...]
+    audio_groups = {}  # group id -> [(is_default, url, ordinal), ...]
+    audio_count = 0
     for line in lines:
         line = line.strip()
         if not line.startswith("#EXT-X-MEDIA:") or "TYPE=AUDIO" not in line:
             continue
         gm = re.search(r'GROUP-ID="([^"]+)"', line)
+        if not gm:
+            continue
         um = re.search(r'URI="([^"]+)"', line)
-        if gm and um:
-            audio_groups.setdefault(gm.group(1), []).append(
-                ("DEFAULT=YES" in line, urljoin(master_url, um.group(1)))
-            )
-    best = None  # (bandwidth, variant_url, audio_group)
+        url = urljoin(master_url, um.group(1)) if um else None
+        audio_groups.setdefault(gm.group(1), []).append(
+            ("DEFAULT=YES" in line, url, audio_count)
+        )
+        audio_count += 1
+    best = None  # (bandwidth, variant_url, audio_group, variant_ordinal)
+    variant_count = 0
     for i, line in enumerate(lines):
         line = line.strip()
         if not line.startswith("#EXT-X-STREAM-INF"):
             continue
+        v_ord = variant_count
+        variant_count += 1
         attrs = line.split(":", 1)[1] if ":" in line else ""
         cm = re.search(r'CODECS="([^"]+)"', attrs)
         codecs = cm.group(1) if cm else ""
@@ -596,17 +606,19 @@ def pick_live_variant(master_url):
             if nxt.startswith("#"):
                 break
             if best is None or bw > best[0]:
-                best = (bw, urljoin(master_url, nxt), group)
+                best = (bw, urljoin(master_url, nxt), group, v_ord)
             break
     if not best:
         return None
     audio_url = None
+    audio_ord = None
     renditions = audio_groups.get(best[2] or "", [])
     if renditions:
-        audio_url = next(
-            (u for is_default, u in renditions if is_default), renditions[0][1]
-        )
-    return (best[1], audio_url)
+        chosen = next((r for r in renditions if r[0]), renditions[0])
+        audio_url = chosen[1]
+        if audio_url:
+            audio_ord = chosen[2]
+    return (best[1], audio_url, best[3], audio_ord)
 
 
 def resolve_youtube(item):
@@ -1367,12 +1379,21 @@ class Handler(BaseHTTPRequestHandler):
         if not ffmpeg:
             self.redirect_absolute(resolved)
             return
-        # Feed ffmpeg the best H.264 variant plus its audio rendition
-        # (two playlists - the variant alone carries no sound) rather
-        # than the master itself, so the -c copy into MP4 stays H.264;
-        # if no variant qualifies (or the playlist can't be read), the
-        # master goes in and ffmpeg picks on its own. The audio in
-        # these playlists is ADTS, which an MP4 can't hold as-is - the
+        # Feed ffmpeg the master playlist as ONE input, mapping the
+        # best H.264 variant and its audio rendition by their
+        # positions in the playlist (pick_live_variant's ordinals).
+        # The relay used to feed the variant and audio playlists as
+        # TWO separate inputs - but each input then runs its own
+        # live-playlist cycle, and the two can drift a whole segment
+        # (~5s) apart in what they're actually playing: the picture
+        # and the sound come out of sync (measured +5.03s of skew on
+        # a 90s capture, and a 5.04s hole at the start of the audio
+        # on another). One input means one demuxer serving both
+        # renditions off the same playlist snapshot, so they stay
+        # locked together. If no variant qualifies (or the playlist
+        # can't be read), the master still goes in as one input and
+        # ffmpeg picks the first streams. The audio in these
+        # playlists is ADTS, which an MP4 can't hold as-is - the
         # aac_adtstoasc bitstream filter rewrites the headers on the
         # way through (still a copy, no re-encode).
         reconnect = [
@@ -1386,14 +1407,12 @@ class Handler(BaseHTTPRequestHandler):
         picked = pick_live_variant(resolved)
         cmd = [ffmpeg, "-v", "error"] + reconnect
         if picked:
-            vurl, aurl = picked
-            cmd += ["-i", vurl]
-            if aurl:
-                cmd += reconnect + ["-i", aurl]
-                amap = "1:a:0"
+            _vurl, _aurl, v_ord, a_ord = picked
+            cmd += ["-i", resolved, "-map", "0:v:%d" % v_ord]
+            if a_ord is not None:
+                cmd += ["-map", "0:a:%d" % a_ord]
             else:
-                amap = "0:a:0?"
-            cmd += ["-map", "0:v:0", "-map", amap]
+                cmd += ["-map", "0:a:0?"]
         else:
             cmd += ["-i", resolved, "-map", "0:v:0", "-map", "0:a:0?"]
         cmd += [

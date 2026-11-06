@@ -80,6 +80,10 @@ If you add a YouTube video without a name, the addon fills in the video's **real
 
 Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for a minute for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
 
+### Fix in 1.6.2
+
+- **Live lip-sync fixed.** On live streams the picture and the sound could drift apart — the relay was feeding the video playlist and the sound playlist to ffmpeg as two separate inputs, and the two sides could end up a whole segment (about 5 seconds) apart in what they were playing, so voices and lips didn't match. The relay now reads the live stream as one single input, so picture and sound stay locked together.
+
 ### Fix in 1.6.1
 
 - **Channel videos are labeled with their channel.** In the catalog, each of a channel's uploads shows as "Channel Name — Video Title", so you can tell which channel it came from.
