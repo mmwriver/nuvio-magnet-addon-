@@ -70,6 +70,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote, unquote, urljoin
 
 PORT = int(os.environ.get("PORT", "7777"))
+UPDATE_URL = os.environ.get(
+    "MAGNET_UPDATE_URL",
+    "https://raw.githubusercontent.com/mmwriver/nuvio-magnet-addon-/main/magnet_addon.py",
+)
 HERE = os.path.dirname(os.path.abspath(__file__))
 _home = os.environ.get("MAGNET_ADDON_HOME")
 DATA_DIR = _home if _home else HERE
@@ -161,7 +165,7 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.6.7",
+    "version": "1.6.8",
     "name": "My Magnet Links",
     "description": "Your own pasted magnet links, web video links, YouTube videos and channels, playable in Nuvio.",
     "logo": "",
@@ -541,7 +545,7 @@ def live_master_url(item):
     return None
 
 
-def pick_live_variant(master_url):
+def pick_live_variant_full(master_url):
     """Pick the live relay's variant out of a live master playlist,
     or None. Fetches the playlist and scans its #EXT-X-STREAM-INF
     entries for the highest-bandwidth one whose video codec is avc1
@@ -561,7 +565,15 @@ def pick_live_variant(master_url):
     how ffmpeg numbers the streams of the master playlist when it is
     read as ONE input (0:v:N / 0:a:N), which is how the relay feeds
     it - see handle_live. Any failure - fetch error, no avc1
-    variant - returns None and the caller falls back."""
+    variant - returns None and the caller falls back.
+
+    The _full form additionally returns, as a fifth element, a
+    ready-made "mini master" playlist text holding ONLY the
+    chosen variant and its audio rendition - their lines copied
+    from this same fetch of the master, the rendition's URI
+    absolutized - or None when it cannot be assembled (no audio
+    rendition). handle_live serves it back to ffmpeg as a
+    one-variant master for TS-layout broadcasts (see there)."""
     try:
         req = urllib.request.Request(
             master_url, headers={"User-Agent": "Mozilla/5.0"}
@@ -583,7 +595,7 @@ def pick_live_variant(master_url):
         um = re.search(r'URI="([^"]+)"', line)
         url = urljoin(master_url, um.group(1)) if um else None
         audio_groups.setdefault(gm.group(1), []).append(
-            ("DEFAULT=YES" in line, url, audio_count)
+            ("DEFAULT=YES" in line, url, audio_count, line)
         )
         audio_count += 1
     best = None  # (bandwidth, variant_url, audio_group, variant_ordinal)
@@ -614,19 +626,68 @@ def pick_live_variant(master_url):
             if nxt.startswith("#"):
                 break
             if best is None or bw > best[0]:
-                best = (bw, urljoin(master_url, nxt), group, v_ord)
+                best = (bw, urljoin(master_url, nxt), group, v_ord, line)
             break
     if not best:
         return None
     audio_url = None
     audio_ord = None
+    media_line = None
     renditions = audio_groups.get(best[2] or "", [])
     if renditions:
         chosen = next((r for r in renditions if r[0]), renditions[0])
         audio_url = chosen[1]
         if audio_url:
             audio_ord = chosen[2]
-    return (best[1], audio_url, best[3], audio_ord)
+            media_line = chosen[3]
+    mini_text = None
+    if audio_url and media_line:
+        media_abs = re.sub(
+            r'URI="[^"]*"', 'URI="%s"' % audio_url, media_line
+        )
+        mini_text = (
+            "#EXTM3U\n#EXT-X-VERSION:3\n"
+            "#EXT-X-INDEPENDENT-SEGMENTS\n%s\n%s\n%s\n"
+            % (media_abs, best[4], best[1])
+        )
+    return (best[1], audio_url, best[3], audio_ord, mini_text)
+
+
+def pick_live_variant(master_url):
+    """pick_live_variant_full without the mini-master text - the
+    (variant_url, audio_url, variant_ordinal, audio_ordinal) tuple
+    the caller outside the relay's TS form uses."""
+    full = pick_live_variant_full(master_url)
+    if full is None:
+        return None
+    return full[:4]
+
+
+_MINI_MASTERS = {}
+_MINI_MASTER_TTL = 600.0
+
+
+def stash_mini_master(text):
+    """Keep a mini master playlist in memory for ffmpeg to fetch
+    from this same server (the /minimaster/ route in do_GET);
+    returns the token naming it. Entries live ten minutes - ffmpeg
+    fetches the master once, when it starts, so that is ample."""
+    now = time.time()
+    for tok in [t for t, (ts, _) in list(_MINI_MASTERS.items())
+                if now - ts > _MINI_MASTER_TTL]:
+        del _MINI_MASTERS[tok]
+    token = hashlib.sha1(
+        ("%s|%s|%d" % (text, now, os.getpid())).encode("utf-8")
+    ).hexdigest()[:16]
+    _MINI_MASTERS[token] = (now, text)
+    return token
+
+
+def get_mini_master(token):
+    entry = _MINI_MASTERS.get(token or "")
+    if not entry:
+        return None
+    return entry[1]
 
 
 def live_variant_layout(variant_url):
@@ -1077,6 +1138,85 @@ def meta_of(item):
     return meta
 
 
+def _fetched_version(text):
+    """The version marker of a magnet_addon.py source text - the same
+    "version" field the manifest carries - or None if there is none."""
+    m = re.search(r'"version"\s*:\s*"([0-9]+(?:\.[0-9]+)*)"', text or "")
+    return m.group(1) if m else None
+
+
+def _version_key(version):
+    return tuple(int(p) for p in version.split("."))
+
+
+def fetch_update():
+    """Fetch the newest magnet_addon.py and install it over the
+    running script's own file - but only when what came back is valid
+    Python carrying a strictly newer version. Returns (new_version,
+    None) on success and (None, reason) otherwise; on any failure the
+    running file is left exactly as it was."""
+    try:
+        req = urllib.request.Request(
+            UPDATE_URL,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0 Safari/537.36"
+                )
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+    except Exception as e:
+        return None, "Could not fetch the update (%s). Nothing changed." % e
+    try:
+        text = raw.decode("utf-8")
+    except Exception:
+        return None, "The update that came back was not readable text. Nothing changed."
+    new_version = _fetched_version(text)
+    if not new_version:
+        return None, "The update that came back has no version marker. Nothing changed."
+    if _version_key(new_version) <= _version_key(MANIFEST["version"]):
+        return None, (
+            "Already up to date - the newest version out there is %s "
+            "and you are running %s." % (new_version, MANIFEST["version"])
+        )
+    try:
+        compile(text, "magnet_addon.py", "exec")
+    except Exception:
+        return None, "The update that came back is not valid Python. Nothing changed."
+    target = os.path.abspath(__file__)
+    tmp = target + ".update-tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, target)
+    except Exception as e:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return None, "Could not write the update (%s). Nothing changed." % e
+    return new_version, None
+
+
+def updated_page(version):
+    return """<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>My Magnet Links</title>
+<meta http-equiv="refresh" content="4;url=/configure">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{background:#111;color:#eee;font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:640px;margin:24px auto;padding:0 16px}</style>
+</head><body>
+<h2>Updated to version %s</h2>
+<p>The app is restarting on the new version - this page will reload
+to the configure page in a few seconds.</p>
+<script>setTimeout(function(){ location.replace("/configure"); }, 4000);</script>
+</body></html>""" % esc(version)
+
+
+
+
 def esc(s):
     return (
         s.replace("&", "&amp;")
@@ -1126,6 +1266,15 @@ join the catalog on their own: the app re-checks each channel about
 every 30 minutes while it runs, so new uploads appear without you
 pasting anything. Nuvio shows them when its list refreshes -
 reopening Nuvio, or searching for the title.</p>"""
+    update_form = """<form method="post" action="/update" style="margin-top:28px">
+<label>Updates</label>
+<p style="color:#999;margin:4px 0 8px">You are running version %s.
+Pressing Update fetches the newest version and installs it in place;
+the app restarts itself and this page comes back on the new version.
+Approving the app in macOS Settings is a one-time thing - updates
+through this button never need it again.</p>
+<button type="submit">Update</button>
+</form>""" % MANIFEST["version"]
     rows = ""
     for it in links:
         rows += (
@@ -1212,8 +1361,9 @@ are the same thing, one kind at a time.</p>
 </form>
 %s
 %s
+%s
 <h3>Saved</h3>%s
-</body></html>""" % (PORT, note, quality_form, channel_form, rows)
+</body></html>""" % (PORT, note, quality_form, channel_form, update_form, rows)
     return html
 
 
@@ -1440,14 +1590,25 @@ class Handler(BaseHTTPRequestHandler):
         # LiveNOW's newer broadcasts use): the master-as-one-input
         # form is unusable - ffmpeg stalls enumerating the master's
         # many variants and produces nothing for tens of seconds, so
-        # the player sits at "buffering" and gives up. Feed the two
-        # PINNED playlists instead: the chosen variant as input 0
-        # and its audio rendition as input 1, each with its own
-        # reconnect flags. These playlists name their segments
-        # directly, ffmpeg starts at once, and because both are
-        # pinned to the same broadcast the renditions stay in step
-        # (measured: both streams starting at 0.000, tail ~0.1s
-        # apart on a 60s capture).
+        # the player sits at "buffering" and gives up. The first TS
+        # form fed the two PINNED playlists (variant, audio) as two
+        # inputs - but that has the same disease as the old fMP4
+        # two-input form: each demuxer picks its own start segment
+        # off its own fetch of its playlist, and the two picks land
+        # a segment apart (measured on LiveNOW at content level:
+        # the sound came out a full segment - +5.01s - ahead of the
+        # picture, even though both streams' containers stamped
+        # 0.000, so container-level checks never saw it). So the TS
+        # form now builds a MINI MASTER - a playlist naming only
+        # the chosen variant and its audio rendition - serves it
+        # from this very process (the /minimaster/ route; a local
+        # file won't do, ffmpeg's playlist reader refuses https
+        # sub-playlists under a file:// master), and feeds THAT to
+        # ffmpeg as one input: one demuxer, one timeline, both
+        # renditions locked (measured against a PROGRAM-DATE-TIME-
+        # aligned reference of the same broadcast window: -0.008s
+        # of skew). The two-input pinned form stays as the fallback
+        # for when the mini master can't be built or started.
         #
         # If the layout can't be determined (or no variant
         # qualified in the first place), the master still goes in as
@@ -1464,37 +1625,9 @@ class Handler(BaseHTTPRequestHandler):
             "-reconnect_delay_max",
             "5",
         ]
-        picked = pick_live_variant(resolved)
-        cmd = [ffmpeg, "-v", "error"]
-        ts_form = False
-        if picked:
-            vurl, aurl, v_ord, a_ord = picked
-            if live_variant_layout(vurl) is False:
-                # TS layout: pinned variant + pinned audio inputs.
-                cmd += reconnect + ["-i", vurl]
-                if aurl:
-                    cmd += reconnect + [
-                        "-i",
-                        aurl,
-                        "-map",
-                        "0:v:0",
-                        "-map",
-                        "1:a:0",
-                    ]
-                else:
-                    cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
-                ts_form = True
-        if not ts_form:
-            cmd += reconnect
-            if picked:
-                cmd += ["-i", resolved, "-map", "0:v:%d" % v_ord]
-                if a_ord is not None:
-                    cmd += ["-map", "0:a:%d" % a_ord]
-                else:
-                    cmd += ["-map", "0:a:0?"]
-            else:
-                cmd += ["-i", resolved, "-map", "0:v:0", "-map", "0:a:0?"]
-        cmd += [
+        picked_full = pick_live_variant_full(resolved)
+        picked = picked_full[:4] if picked_full else None
+        tail = [
             "-c",
             "copy",
             "-bsf:a",
@@ -1505,9 +1638,54 @@ class Handler(BaseHTTPRequestHandler):
             "mp4",
             "pipe:1",
         ]
-        if not self._pump_ffmpeg(cmd):
-            self.redirect_absolute(resolved)
-            return
+        attempts = []
+        if picked:
+            vurl, aurl, v_ord, a_ord = picked
+            if live_variant_layout(vurl) is False:
+                # TS layout. First choice: the mini master as ONE
+                # input (see the layout comment above).
+                if picked_full[4]:
+                    token = stash_mini_master(picked_full[4])
+                    mcmd = [ffmpeg, "-v", "error"] + reconnect + [
+                        "-i",
+                        "http://127.0.0.1:%d/minimaster/%s.m3u8"
+                        % (PORT, token),
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "0:a:0" if aurl else "0:a:0?",
+                    ]
+                    attempts.append(mcmd + tail)
+                # Fallback: the two pinned playlists as two inputs.
+                tcmd = [ffmpeg, "-v", "error"] + reconnect + ["-i", vurl]
+                if aurl:
+                    tcmd += reconnect + [
+                        "-i",
+                        aurl,
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0",
+                    ]
+                else:
+                    tcmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+                attempts.append(tcmd + tail)
+        if not attempts:
+            cmd = [ffmpeg, "-v", "error"] + reconnect
+            if picked:
+                cmd += ["-i", resolved, "-map", "0:v:%d" % v_ord]
+                if a_ord is not None:
+                    cmd += ["-map", "0:a:%d" % a_ord]
+                else:
+                    cmd += ["-map", "0:a:0?"]
+            else:
+                cmd += ["-i", resolved, "-map", "0:v:0", "-map", "0:a:0?"]
+            attempts.append(cmd + tail)
+        for cmd in attempts:
+            if self._pump_ffmpeg(cmd):
+                return
+        self.redirect_absolute(resolved)
+        return
 
     def do_HEAD(self):
         parsed = urlparse(self.path)
@@ -1534,6 +1712,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/live/"):
             self.handle_live(path[len("/live/"):])
+            return
+        if path.startswith("/minimaster/"):
+            # A mini master playlist stashed by handle_live (see
+            # stash_mini_master) - ffmpeg fetches it here so it can
+            # run ONE demuxer over a TS broadcast's variant + audio
+            # rendition. It has to come over http: a file:// master
+            # makes ffmpeg's playlist reader refuse the https
+            # sub-playlists it names.
+            token = path[len("/minimaster/"):].split(".")[0]
+            text = get_mini_master(token)
+            if text is None:
+                self.send_json({"error": "not found"}, 404)
+                return
+            body = text.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if path == "/manifest.json":
             self.send_json(MANIFEST)
@@ -1775,6 +1974,30 @@ class Handler(BaseHTTPRequestHandler):
             item = resolve_channel(item, keep_name=bool(name))
             save_channel(item)
             self.redirect("/configure")
+            return
+        if parsed.path == "/update":
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            new_version, err = fetch_update()
+            if err:
+                self.redirect("/configure?msg=" + quote(err))
+                return
+            self.send_html(updated_page(new_version))
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            self.close_connection = True
+
+            def _restart():
+                time.sleep(0.5)
+                os.execv(
+                    sys.executable,
+                    [sys.executable, os.path.abspath(__file__)] + sys.argv[1:],
+                )
+
+            threading.Thread(target=_restart, daemon=True).start()
             return
         if parsed.path == "/settings":
             length = int(self.headers.get("Content-Length") or 0)
