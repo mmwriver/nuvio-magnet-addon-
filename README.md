@@ -80,6 +80,10 @@ If you add a YouTube video without a name, the addon fills in the video's **real
 
 Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for a minute for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
 
+### Removed in 1.6.6
+
+- **The in-Nuvio Delete entry is gone.** The Delete option added in 1.6.3 as the last entry in every item's stream list has been removed at the owner's call — stream lists are back to just the play streams. To delete something, use the **Delete** links on the configure page, same as before 1.6.3.
+
 ### Fix in 1.6.5
 
 - **The app notices a cookies file that appears after it starts.** If the addon started while no cookies file was in Downloads, it used to remember "no cookies" for as long as it ran — so exporting the cookies later changed nothing until the app was restarted, and YouTube streams could come back unavailable. A "not found" answer now only lasts about 30 seconds, and a failed stream lookup searches once more on the spot. Export your cookies whenever; no restart needed.
@@ -89,9 +93,9 @@ Repeat plays start fast: the addon remembers each resolved stream address in mem
 - **Approve once, update forever.** Until now every new app version had to be approved again under System Settings → Privacy & Security → Open Anyway, because each rebuild was a brand-new app bundle in macOS's eyes. The app now copies `magnet_addon.py` into the Application Support folder (`~/Library/Application Support/My Magnet Links/`) on its first run and runs it from there — the bundle itself never changes again, so the one approval covers it for good. (Your saved lists were already kept in that folder; now the script lives there too.)
 - **Update button.** The `/configure` page shows the running version and an **Update** button. Pressing it fetches the newest `magnet_addon.py`, checks that it's valid and actually newer, swaps it in, and restarts the app on the new version — this page comes back by itself. Terminal-version users get the same button: it updates their script in place the same way. From here on, new versions install themselves; nobody has to re-approve anything.
 
-### New in 1.6.3
+### New in 1.6.3 (removed again in 1.6.6)
 
-- **Delete items from inside Nuvio.** The addon protocol has no buttons or menus, so deleting rides in as a stream: open any saved item in Nuvio and the **last** entry in its stream list is a **Delete** option. Picking it removes the item and plays a one-second blank clip. For a video that came from a saved channel, the entry instead removes the **whole channel** and its videos. There is no undo — paste the link again to bring something back. A deleted item can still show in Nuvio's list until that list refreshes; reopening Nuvio, or searching, shows the updated list.
+- **Delete items from inside Nuvio** — this feature shipped in 1.6.3 and was **removed in 1.6.6** at the owner's call. Deleting is done on the configure page.
 
 ### Fix in 1.6.2
 
