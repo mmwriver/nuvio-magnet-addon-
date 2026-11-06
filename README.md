@@ -107,6 +107,18 @@ Trade-offs to know: the merge starts slower than the plain stream (the addon has
 
 Saved YouTube videos live in their own file, `youtube.json`, next to `magnets.json`, and you can delete them from the configure page too.
 
+## New in 1.6.0 — YouTube channels
+
+You can now follow whole YouTube channels, not just single videos. On the `/configure` page there's a fourth form, **YouTube channel link**: paste a channel address (`youtube.com/@channelname`, `youtube.com/channel/UC...`, `youtube.com/c/...` or `youtube.com/user/...` — a tab suffix like `/videos` is fine), give it a name if you like, and save. The one paste box at the top also recognises channel links and files them the same way. A channel's real name fills in automatically when you don't type one.
+
+The channel's **newest 10 uploads** then appear in the same **My Magnet Links** catalog, after your own saved items. The addon re-checks each channel about **every 30 minutes** while it runs, so new uploads show up on their own — you don't paste anything else. If a re-check fails, the last good list stays in place rather than the channel's videos vanishing.
+
+Channel videos play exactly like individually pasted YouTube videos — same quality setting, same HD merge, and if an upload is a live stream it gets the live relay. (The catalog lists a channel's uploads; a channel's *current* live stream lives on its streams tab, so to pin a live channel, add its live video link as a regular YouTube item.)
+
+One caveat, on Nuvio's side: Nuvio holds the addon list it already fetched, so freshly appeared uploads show when Nuvio's list refreshes — reopening Nuvio, or searching the title (search asks the addon live).
+
+Saved channels live in their own file, `channels.json`, next to `magnets.json`. Deleting a channel from the configure page removes its videos from the catalog; the videos themselves were never stored individually.
+
 ## Notes
 
 - The addon only hands Nuvio the magnet link; the video itself streams from the torrent through Nuvio.

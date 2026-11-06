@@ -28,6 +28,12 @@ up with - playback stops when the window runs out. So for live items
 the addon pulls the feed itself with ffmpeg and hands Nuvio one
 continuous stream instead.
 
+You can also add whole YouTube channels. A channel's newest uploads
+(up to ten) appear in the same catalog on their own: the addon
+re-checks each channel about every half hour while it runs, so new
+uploads show up by themselves without you pasting anything else.
+Channel videos play exactly like individually pasted YouTube videos.
+
 YouTube fetches use a browser cookies file when one is around - the
 addon finds it by itself in Downloads, including the file Opera's
 cookies extension saves in Downloads/Temp - and if the exported
@@ -68,6 +74,7 @@ if _home:
 STORE = os.path.join(DATA_DIR, "magnets.json")
 LINK_STORE = os.path.join(DATA_DIR, "links.json")
 YT_STORE = os.path.join(DATA_DIR, "youtube.json")
+CHANNEL_STORE = os.path.join(DATA_DIR, "channels.json")
 SETTINGS_STORE = os.path.join(DATA_DIR, "settings.json")
 
 QUALITY_VALUES = ("1080", "720", "480", "360", "best")
@@ -94,6 +101,13 @@ PAIR_TTL = 4 * 3600
 CACHE_LOCK = threading.Lock()
 _resolve_cache = {}  # (video_id, quality) -> (url, timestamp)
 _pair_cache = {}  # (video_id, cap) -> (video_url, audio_url, timestamp)
+
+# Channel uploads cache: a channel's newest uploads are re-fetched at
+# most every CHANNEL_TTL - often enough that new uploads appear on
+# their own, rare enough that opening the catalog stays fast.
+CHANNEL_TTL = 30 * 60
+CHANNEL_LIMIT = 10
+_channel_cache = {}  # channel item id -> ([(video_id, title)], timestamp)
 
 
 def _is_hls_url(url):
@@ -143,9 +157,9 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.5.3",
+    "version": "1.6.0",
     "name": "My Magnet Links",
-    "description": "Your own pasted magnet links, web video links and YouTube videos, playable in Nuvio.",
+    "description": "Your own pasted magnet links, web video links, YouTube videos and channels, playable in Nuvio.",
     "logo": "",
     "resources": ["catalog", "meta", "stream"],
     "types": ["movie"],
@@ -276,6 +290,84 @@ def parse_youtube(url, name=""):
         "url": "https://www.youtube.com/watch?v=" + vid,
         "kind": "youtube",
     }
+
+
+CHANNEL_RE = re.compile(
+    r"youtube\.com/(?:@([A-Za-z0-9._-]+)|channel/(UC[A-Za-z0-9_-]{22})"
+    r"|c/([A-Za-z0-9._-]+)|user/([A-Za-z0-9._-]+))",
+    re.IGNORECASE,
+)
+
+
+def parse_channel(url, name=""):
+    """Return a store item dict from a YouTube channel URL, or None.
+
+    Accepts the channel page shapes: youtube.com/@handle (any tab
+    suffix - /videos, /streams, /featured, ... - is fine),
+    youtube.com/channel/UC..., youtube.com/c/<name> and
+    youtube.com/user/<name>. Video URLs are NOT channel URLs: they
+    return None here and stay individual YouTube items. The item id
+    is provisional - the UC id when the URL itself carries it, else
+    a hash of the canonical URL; resolve_channel() upgrades it with
+    the real channel id and title when yt-dlp can be asked."""
+    url = (url or "").strip()
+    low = url.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        return None
+    if "youtu.be/" in low:
+        return None
+    m = CHANNEL_RE.search(url)
+    if not m:
+        return None
+    handle, ucid, cname, uname = m.groups()
+    if ucid:
+        base = "https://www.youtube.com/channel/" + ucid
+        fallback = ucid
+        key = ucid
+    elif handle:
+        base = "https://www.youtube.com/@" + handle
+        fallback = handle
+        key = None
+    elif cname:
+        base = "https://www.youtube.com/c/" + cname
+        fallback = cname
+        key = None
+    else:
+        base = "https://www.youtube.com/user/" + uname
+        fallback = uname
+        key = None
+    if not key:
+        key = hashlib.sha1(base.encode("utf-8")).hexdigest()
+    item = {
+        "id": "channel:" + key,
+        "name": (name or "").strip() or fallback,
+        "url": base,
+        "videos_url": base + "/videos",
+        "kind": "channel",
+    }
+    if ucid:
+        item["ucid"] = ucid
+    return item
+
+
+def save_channel(item):
+    """Insert a channel item at the front of channels.json, replacing
+    any existing entry for the same channel - matched by item id, by
+    videos URL, or by resolved UC id, so adding a channel twice (once
+    by handle, once by channel URL) never duplicates it."""
+    def same(old):
+        if old.get("id") == item["id"]:
+            return True
+        if old.get("videos_url") == item["videos_url"]:
+            return True
+        if item.get("ucid") and old.get("ucid") == item["ucid"]:
+            return True
+        return False
+
+    with LOCK:
+        items = [i for i in load_store(CHANNEL_STORE) if not same(i)]
+        items.insert(0, item)
+        save_store(items, CHANNEL_STORE)
 
 
 def find_ytdlp():
@@ -615,6 +707,113 @@ def fetch_youtube_title(url):
     return title
 
 
+def _channel_dump(videos_url, playlist_end, timeout):
+    """One yt-dlp flat-playlist JSON dump of a channel's videos tab,
+    or None on any failure. The top level carries the channel's own
+    fields (channel = title, channel_id = UC id) and each entry a
+    video's id and title. Cookies when a file is found, with the
+    usual refresh + no-cookies retries (exported cookies go stale)."""
+    ytdlp = find_ytdlp()
+    if not ytdlp:
+        return None
+
+    def attempt(cookies_path):
+        cmd = [
+            ytdlp,
+            "--flat-playlist",
+            "--playlist-end",
+            str(playlist_end),
+            "-J",
+            "--no-warnings",
+        ]
+        if cookies_path:
+            cmd += ["--cookies", cookies_path]
+        cmd += ["--", videos_url]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except Exception:
+            return None
+        if out.returncode != 0:
+            return None
+        try:
+            data = json.loads(out.stdout)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    cookies_path = find_cookies()
+    data = attempt(cookies_path)
+    if data is None and cookies_path:
+        fresh = find_cookies(refresh=True)
+        if fresh and fresh != cookies_path:
+            data = attempt(fresh)
+        if data is None:
+            data = attempt(None)
+    return data
+
+
+def resolve_channel(item, keep_name=False):
+    """Best-effort fill-in of a channel item's real title and UC id
+    via yt-dlp (one flat entry is enough to get the channel fields).
+    When the UC id comes back, the item's id and URLs are upgraded
+    to the canonical /channel/UC... form. A name the user typed
+    (keep_name) is never overwritten. Any failure just leaves the
+    URL-derived values in place, so adding a channel never breaks
+    over a lookup."""
+    data = _channel_dump(item["videos_url"], 1, 30)
+    if not data:
+        return item
+    ucid = data.get("channel_id") or ""
+    if ucid.startswith("UC"):
+        item["ucid"] = ucid
+        item["id"] = "channel:" + ucid
+        item["url"] = "https://www.youtube.com/channel/" + ucid
+        item["videos_url"] = item["url"] + "/videos"
+    title = (data.get("channel") or "").strip()
+    if title and not keep_name:
+        item["name"] = title[:120]
+    return item
+
+
+def fetch_channel_videos(channel):
+    """The channel's newest uploads as [(video_id, title)], newest
+    first, or None when the fetch itself failed (callers then serve
+    the last good list instead of wiping the channel's videos)."""
+    data = _channel_dump(channel["videos_url"], CHANNEL_LIMIT, 60)
+    if data is None:
+        return None
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return None
+    videos = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        vid = str(e.get("id") or "")
+        if len(vid) != 11:
+            continue
+        title = (e.get("title") or "").strip() or ("YouTube " + vid)
+        videos.append((vid, title[:200]))
+    return videos
+
+
+def channel_videos(channel):
+    """Cache-aware newest-uploads list for a saved channel. The
+    fetch repeats at most every CHANNEL_TTL; a failed refetch serves
+    the last good list (never an empty wipe)."""
+    cid = channel["id"]
+    with CACHE_LOCK:
+        hit = _channel_cache.get(cid)
+    if hit and time.time() - hit[1] < CHANNEL_TTL:
+        return hit[0]
+    fresh = fetch_channel_videos(channel)
+    if fresh is not None:
+        with CACHE_LOCK:
+            _channel_cache[cid] = (fresh, time.time())
+        return fresh
+    return hit[0] if hit else []
+
+
 def find_ffmpeg():
     """Locate an ffmpeg binary, or None (same lookup pattern as yt-dlp)."""
     env = os.environ.get("FFMPEG_BIN")
@@ -705,14 +904,33 @@ def pick_merge_pair(info, cap):
     return videos[-1][2], audios[-1][1]
 
 
+def synth_youtube_item(vid):
+    """A playable YouTube item built from just a video id - used for
+    videos that belong to a saved channel (they are never stored
+    individually) and for well-formed ids Nuvio asks about directly.
+    Everything downstream (poster, title fetch, stream resolution)
+    already derives what it needs from the id."""
+    return {
+        "id": "youtube:" + vid,
+        "name": "YouTube " + vid,
+        "url": "https://www.youtube.com/watch?v=" + vid,
+        "kind": "youtube",
+    }
+
+
 def find_youtube_item(raw_id):
     """The saved YouTube item for a /play or /live path tail - accepts
-    the full "youtube:..." id or the bare video id. None if not saved."""
+    the full "youtube:..." id or the bare video id. An unsaved but
+    well-formed id (e.g. a video from a saved channel) synthesizes a
+    playable item; anything else is None."""
     item_id = unquote(raw_id or "")
     with LOCK:
         for it in load_store(YT_STORE):
             if it["id"] == item_id or it["id"] == "youtube:" + item_id:
                 return it
+    m = re.match(r"(?:youtube:)?([A-Za-z0-9_-]{11})$", item_id)
+    if m:
+        return synth_youtube_item(m.group(1))
     return None
 
 
@@ -730,6 +948,11 @@ def find_item(item_id):
         for it in load_store(YT_STORE):
             if it["id"] == item_id:
                 return it
+    # Not saved: a well-formed YouTube id still plays (this is how
+    # videos from saved channels resolve - they are never stored).
+    m = re.match(r"youtube:([A-Za-z0-9_-]{11})$", item_id)
+    if m:
+        return synth_youtube_item(m.group(1))
     # Not saved: still playable from the bare hash.
     m = re.match(r"magnet:([a-f0-9]{40})$", item_id)
     if m:
@@ -780,6 +1003,7 @@ def configure_page(msg=""):
         magnets = load_store(STORE)
         links = load_store(LINK_STORE)
         youtubes = load_store(YT_STORE)
+        channels = load_store(CHANNEL_STORE)
         quality = load_settings()["quality"]
     options = ""
     for value, label in QUALITY_LABELS:
@@ -801,6 +1025,18 @@ a fallback.</p>
 <p style="color:#999">Live items get a <b>Live relay</b> stream:
 the app pulls the live feed itself and hands it to Nuvio as one
 continuous stream.</p>""" % options
+    channel_form = """<form method="post" action="/addchannel" style="margin-top:28px">
+<label>Name (optional)</label>
+<input name="name" placeholder="Channel name - the real one fills in by itself">
+<label>YouTube channel link</label>
+<input name="channel" placeholder="https://www.youtube.com/@channelname">
+<button type="submit">Add channel</button>
+</form>
+<p style="color:#999">A channel's <b>newest uploads</b> (up to ten)
+join the catalog on their own: the app re-checks each channel about
+every 30 minutes while it runs, so new uploads appear without you
+pasting anything. Nuvio shows them when its list refreshes -
+reopening Nuvio, or searching for the title.</p>"""
     rows = ""
     for it in links:
         rows += (
@@ -818,6 +1054,14 @@ continuous stream.</p>""" % options
             '<a href="/delete?id=%s" style="color:#e66">Delete</a></div>'
             % (esc(it["name"]), esc(it["url"]), esc(it["id"]))
         )
+    for it in channels:
+        rows += (
+            '<div style="padding:10px 0;border-bottom:1px solid #333">'
+            "<b>%s</b> <small style='color:#7ab'>(channel)</small><br>"
+            "<small style='color:#999'>%s</small><br>"
+            '<a href="/delete?id=%s" style="color:#e66">Delete</a></div>'
+            % (esc(it["name"]), esc(it["url"]), esc(it["id"]))
+        )
     for it in magnets:
         rows += (
             '<div style="padding:10px 0;border-bottom:1px solid #333">'
@@ -825,7 +1069,7 @@ continuous stream.</p>""" % options
             '<a href="/delete?id=%s" style="color:#e66">Delete</a></div>'
             % (esc(it["name"]), esc(it["id"]), esc(it["id"]))
         )
-    if not magnets and not links and not youtubes:
+    if not magnets and not links and not youtubes and not channels:
         rows = "<p style='color:#999'>Nothing saved yet.</p>"
     note = ('<p style="color:#6f6">%s</p>' % esc(msg)) if msg else ""
     html = """<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -847,8 +1091,8 @@ not a web page.</p>
 installed on this Mac, and the first play can take a few seconds.</p>
 %s
 <form method="post" action="/addany" style="border:1px solid #2b6cb0;border-radius:6px;padding:12px">
-<label><b>Paste any link</b> - magnet, web video address, or YouTube.
-This box sorts out which kind it is.</label>
+<label><b>Paste any link</b> - magnet, web video address, YouTube
+video, or YouTube channel. This box sorts out which kind it is.</label>
 <input name="paste" placeholder="magnet:?... or https://...">
 <label>Name (optional)</label>
 <input name="name" placeholder="Name - YouTube titles fill in by themselves">
@@ -878,8 +1122,9 @@ are the same thing, one kind at a time.</p>
 <button type="submit">Add YouTube video</button>
 </form>
 %s
+%s
 <h3>Saved</h3>%s
-</body></html>""" % (PORT, note, quality_form, rows)
+</body></html>""" % (PORT, note, quality_form, channel_form, rows)
     return html
 
 
@@ -1163,6 +1408,7 @@ class Handler(BaseHTTPRequestHandler):
                 save_store([i for i in load_store(STORE) if i["id"] != did], STORE)
                 save_store([i for i in load_store(LINK_STORE) if i["id"] != did], LINK_STORE)
                 save_store([i for i in load_store(YT_STORE) if i["id"] != did], YT_STORE)
+                save_store([i for i in load_store(CHANNEL_STORE) if i["id"] != did], CHANNEL_STORE)
             self.redirect("/configure")
             return
         # /catalog/movie/mymagnets[.json|/search=..json]
@@ -1175,6 +1421,20 @@ class Handler(BaseHTTPRequestHandler):
                 search = unquote(extra[len("search="):]).lower()
             with LOCK:
                 items = all_items()
+                channels = load_store(CHANNEL_STORE)
+                saved_vids = {youtube_video_id(i) for i in load_store(YT_STORE)}
+            # Channel uploads come after his own saved items, as one
+            # block per channel in saved-channel order, newest first.
+            # A video he already saved individually is not repeated.
+            seen = set(saved_vids)
+            for ch in channels:
+                for vid, title in channel_videos(ch):
+                    if vid in seen:
+                        continue
+                    seen.add(vid)
+                    virtual = synth_youtube_item(vid)
+                    virtual["name"] = title
+                    items.append(virtual)
             metas = [meta_of(i) for i in items if not search or search in i["name"].lower()]
             self.send_json({"metas": metas})
             return
@@ -1277,6 +1537,12 @@ class Handler(BaseHTTPRequestHandler):
                     save_store(items, STORE)
                 self.redirect("/configure")
                 return
+            ch_item = parse_channel(raw, name)
+            if ch_item:
+                ch_item = resolve_channel(ch_item, keep_name=bool(name))
+                save_channel(ch_item)
+                self.redirect("/configure")
+                return
             yt_item = parse_youtube(raw, name)
             if yt_item:
                 if not name:
@@ -1297,7 +1563,7 @@ class Handler(BaseHTTPRequestHandler):
                     save_store(items, LINK_STORE)
                 self.redirect("/configure")
                 return
-            self.send_html(configure_page("That link did not parse - paste a magnet link, a web video address, or a YouTube link. Nothing saved."))
+            self.send_html(configure_page("That link did not parse - paste a magnet link, a web video address, or a YouTube video or channel link. Nothing saved."))
             return
         if parsed.path == "/add":
             length = int(self.headers.get("Content-Length") or 0)
@@ -1348,6 +1614,19 @@ class Handler(BaseHTTPRequestHandler):
                 items = [i for i in load_store(YT_STORE) if i["id"] != item["id"]]
                 items.insert(0, item)
                 save_store(items, YT_STORE)
+            self.redirect("/configure")
+            return
+        if parsed.path == "/addchannel":
+            length = int(self.headers.get("Content-Length") or 0)
+            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            ch = (form.get("channel") or [""])[0]
+            name = (form.get("name") or [""])[0].strip()
+            item = parse_channel(ch, name)
+            if not item:
+                self.send_html(configure_page("That channel link did not parse - it has to be a YouTube channel page (like youtube.com/@channelname), not a video link. Nothing saved."))
+                return
+            item = resolve_channel(item, keep_name=bool(name))
+            save_channel(item)
             self.redirect("/configure")
             return
         if parsed.path == "/settings":
