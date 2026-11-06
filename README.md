@@ -80,6 +80,10 @@ If you add a YouTube video without a name, the addon fills in the video's **real
 
 Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for a minute for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
 
+### Fix in 1.5.3
+
+- **Live items list only the relay.** The direct stream that 1.5.2 kept listed second for live items is gone — the relay is the stream that actually plays through, so live items now show just the one **YouTube Live (relay)** entry. (Matthew's call.)
+
 ### Fix in 1.5.2
 
 - **Live relay.** A YouTube live playlist only hands out a short window of video at a time (about 30 seconds) and expects the player to keep re-asking for the next window — and Nuvio's player doesn't keep up, so live playback stopped after a few seconds even on a fast connection. Live items now list a **YouTube Live (relay)** stream first: the addon follows the live playlist itself with ffmpeg and hands Nuvio one continuous stream, so there's no window to run out of. The direct stream is still listed second, unchanged, if you prefer it.

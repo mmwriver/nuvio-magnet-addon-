@@ -21,14 +21,12 @@ setting on the web page caps how high that stream can go. With the
 quality on 1080p or Best, regular YouTube videos also get an HD merge
 stream: the addon joins YouTube's separate picture and sound streams
 together with ffmpeg as it plays (starts slower, seeking is limited).
-Live streams get a relay stream listed first: YouTube's live
+Live streams list only a relay stream: YouTube's live
 playlists only hand out a short window of video at a time and expect
 the player to keep re-asking for more, which some players don't keep
 up with - playback stops when the window runs out. So for live items
 the addon pulls the feed itself with ffmpeg and hands Nuvio one
-continuous stream instead. The plain stream stays listed second -
-the adaptive master playlist when YouTube offers one, so the player
-can step down on a slow connection instead of stalling.
+continuous stream instead.
 
 YouTube fetches use a browser cookies file when one is around - the
 addon finds it by itself in Downloads, including the file Opera's
@@ -145,7 +143,7 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.5.2",
+    "version": "1.5.3",
     "name": "My Magnet Links",
     "description": "Your own pasted magnet links, web video links and YouTube videos, playable in Nuvio.",
     "logo": "",
@@ -800,10 +798,9 @@ videos also get an <b>HD merge</b> stream listed first: the app joins
 YouTube's separate picture and sound streams together as it plays. It
 starts slower and seeking is limited; the plain stream stays listed as
 a fallback.</p>
-<p style="color:#999">Live items list a <b>Live relay</b> stream
-first: the app pulls the live feed itself and hands it to Nuvio as one
-continuous stream. Use it if the direct live stream stops after a few
-seconds; the direct stream stays listed second.</p>""" % options
+<p style="color:#999">Live items get a <b>Live relay</b> stream:
+the app pulls the live feed itself and hands it to Nuvio as one
+continuous stream.</p>""" % options
     rows = ""
     for it in links:
         rows += (
@@ -1213,12 +1210,12 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 streams = []
                 if plain and _is_hls_url(resolved):
-                    # Live: the relay first - the addon follows the
+                    # Live: only the relay. The addon follows the
                     # live playlist itself and feeds the player one
-                    # continuous stream (a player handed the playlist
-                    # directly can run out of segments and stop). The
-                    # plain direct-master stream stays second. The HD
-                    # merge doesn't apply to live at all.
+                    # continuous stream - a player handed the
+                    # playlist directly can run out of segments and
+                    # stop, so the direct stream is not listed at
+                    # all. The HD merge doesn't apply to live either.
                     streams.append(
                         {
                             "name": "YouTube Live (relay)",
@@ -1228,7 +1225,6 @@ class Handler(BaseHTTPRequestHandler):
                             % (PORT, item["id"]),
                         }
                     )
-                    streams.append(plain)
                 else:
                     if load_settings()["quality"] in ("1080", "best"):
                         streams.append(
