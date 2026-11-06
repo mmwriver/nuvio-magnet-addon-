@@ -37,6 +37,12 @@ Each one is labeled in the list with its channel's name -
 "Channel name — video title" - so you can tell where it came from.
 Channel videos play exactly like individually pasted YouTube videos.
 
+Any saved item can also be deleted from inside Nuvio itself:
+open the item and pick the Delete entry at the bottom of its
+stream list. (The stream protocol has no buttons or menus, so
+deleting rides in as one more "stream"; picking it removes the
+item and plays a one-second blank clip.)
+
 YouTube fetches use a browser cookies file when one is around - the
 addon finds it by itself in Downloads, including the file Opera's
 cookies extension saves in Downloads/Temp - and if the exported
@@ -56,6 +62,7 @@ Install by URL). Keep this window open while you watch.
 Magnet playback is P2P torrent streaming - have your VPN on.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -160,7 +167,7 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.6.2",
+    "version": "1.6.3",
     "name": "My Magnet Links",
     "description": "Your own pasted magnet links, web video links, YouTube videos and channels, playable in Nuvio.",
     "logo": "",
@@ -863,6 +870,130 @@ def cached_channel_display_name(vid):
     return channel_display_name(names.get(cid), title)
 
 
+# The clip GET /remove/ serves: tapping Delete in Nuvio opens the
+# remove URL like a video, so the player gets this tiny blank MP4
+# (about a second of black and silence, fragmented like the other
+# media the addon serves) and shows a harmless blink instead of an
+# error. The deletion itself happens on that same request.
+BLANK_CLIP = base64.b64decode(
+    "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"
+    "BgAABAAAAAAGAAAEAAAAAAYAAAQAAAAABgAABAAAAAAGAAAEAAAAAAYAAAQAAAAABgAABAAAAAAG"
+    "AAAEAAAAAAYAAAQAAAAABgAABAAAAAAGAAAEAAAAAAYAAAQAAAAABgAABAAAAAAGAAAEAAAAAAYA"
+    "AAQAAAAABgAABAAAAAAGAAAEAAAAAAYAAAQAAAAABgAABAAAAAAGAAAEAAAAAAYAAAQAAAAABgAA"
+    "BAAAAAAGAAAEAAAAAAYAAAQAAAAABgAABAAAAAAGAAAEAAAAAAYAAAQAAAAABgAABAAAAAAGAAAE"
+    "AAAAAAYAAAQAAAAABgAABAAAAAAGAAAEAAAAAAYAAAQAAAAABgAABAAAAAAGAAAEAAAAAAYAAAQA"
+    "AAAABgAABAAAAAAGAAAEAAAAAAYAAAQAAAAABgAABAAAAAAGAAAARAAAAAYAAAXcbWRhdAAAAq4G"
+    "Bf//qtxF6b3m2Ui3lizYINkj7u94MjY0IC0gY29yZSAxNjQgcjMxMDggMzFlMTlmOSAtIEguMjY0"
+    "L01QRUctNCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMjMgLSBodHRwOi8vd3d3LnZpZGVv"
+    "bGFuLm9yZy94MjY0Lmh0bWwgLSBvcHRpb25zOiBjYWJhYz0xIHJlZj0zIGRlYmxvY2s9MTowOjAg"
+    "YW5hbHlzZT0weDM6MHgxMTMgbWU9aGV4IHN1Ym1lPTcgcHN5PTEgcHN5X3JkPTEuMDA6MC4wMCBt"
+    "aXhlZF9yZWY9MSBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVsbGlzPTEgOHg4ZGN0PTEgY3Ft"
+    "PTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9LTIgdGhyZWFk"
+    "cz02IGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEg"
+    "aW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9"
+    "MyBiX3B5cmFtaWQ9MiBiX2FkYXB0PTEgYl9iaWFzPTAgZGlyZWN0PTEgd2VpZ2h0Yj0xIG9wZW5f"
+    "Z29wPTAgd2VpZ2h0cD0yIGtleWludD0yNTAga2V5aW50X21pbj0yNSBzY2VuZWN1dD00MCBpbnRy"
+    "YV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29t"
+    "cD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAA"
+    "gAAAADhliIQAN//+9vD+BTZWBFCXEc3onTMfvxW4ujQ3vc4AAq1PEG+4LBNpT2AQQAABnxHdErgs"
+    "pBAdkQAAAAxBmiRsQ3/+p4QAA/wAAAAJQZ5CeIV/AANTAAAACQGeYXRCfwAEPAAAAAkBnmNqQn8A"
+    "BD0AAAASQZpoSahBaJlMCG///qeEAAP9AAAAC0GehkURLCv/AANTAAAACQGepXRCfwAEPQAAAAkB"
+    "nqdqQn8ABDwAAAASQZqsSahBbJlMCG///qeEAAP8AAAAC0GeykUVLCv/AANTAAAACQGe6XRCfwAE"
+    "PAAAAAkBnutqQn8ABDwAAAASQZrwSahBbJlMCG///qeEAAP9AAAAC0GfDkUVLCv/AANTAAAACQGf"
+    "LXRCfwAEPQAAAAkBny9qQn8ABDwAAAASQZs0SahBbJlMCG///qeEAAP8AAAAC0GfUkUVLCv/AANT"
+    "AAAACQGfcXRCfwAEPAAAAAkBn3NqQn8ABDwAAAASQZt4SahBbJlMCGf//p4QAA+ZAAAAC0GflkUV"
+    "LCv/AANSAAAACQGftXRCfwAEPQAAAAkBn7dqQn8ABD0AAAASQZu8SahBbJlMCFf//jhAAD0gAAAA"
+    "C0Gf2kUVLCv/AANTAAAACQGf+XRCfwAEPAAAAAkBn/tqQn8ABD0AAAASQZv9SahBbJlMCE///fEA"
+    "AJeB3gIATGF2YzYyLjI4LjEwMgBCIAjBGDghEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwh"
+    "EARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARg"
+    "jBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwh"
+    "EARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARg"
+    "jBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwhEARgjBwh"
+    "EARgjBwAAABubWZyYQAAACt0ZnJhAQAAAAAAAAEAAAAAAAAAAQAAAAAAAAQAAAAAAAAABOsBAQEA"
+    "AAArdGZyYQEAAAAAAAACAAAAAAAAAAEAAAAAAAAAAAAAAAAAAATrAQEBAAAAEG1mcm8AAAAAAAAA"
+    "bg=="
+)
+
+
+def cached_channel_of(vid):
+    """(channel id, channel name) when a saved channel's cached
+    uploads include this video id - else None. Memory only (never
+    fetches): the same in-memory channel uploads cache the
+    channel-name labels read."""
+    with CACHE_LOCK:
+        per_channel = [
+            (cid, list(videos)) for cid, (videos, _ts) in _channel_cache.items()
+        ]
+    hit = None
+    for cid, videos in per_channel:
+        if any(v == vid for v, _t in videos):
+            hit = cid
+            break
+    if not hit:
+        return None
+    with LOCK:
+        names = {c["id"]: c.get("name") for c in load_store(CHANNEL_STORE)}
+    if hit not in names:
+        return None
+    return (hit, names.get(hit) or "")
+
+
+def remove_stored_item(item_id):
+    """Delete an id from whichever store holds it - all four stores
+    are checked, the same sweep the configure page's /delete does.
+    Returns True when something was actually removed."""
+    removed = False
+    with LOCK:
+        for path in (STORE, LINK_STORE, YT_STORE, CHANNEL_STORE):
+            items = load_store(path)
+            kept = [i for i in items if i["id"] != item_id]
+            if len(kept) != len(items):
+                save_store(kept, path)
+                removed = True
+    return removed
+
+
+def delete_stream_entry(target_id, title):
+    """The Delete stream entry appended last to a stored item's
+    stream list. The Stremio protocol has no buttons or menus, so
+    deleting from inside Nuvio rides in as one more "stream":
+    playing it calls the addon's /remove/ route for the target."""
+    return {
+        "name": "Delete",
+        "title": title,
+        "url": "http://127.0.0.1:%d/remove/%s" % (PORT, target_id),
+    }
+
+
 def find_ffmpeg():
     """Locate an ffmpeg binary, or None (same lookup pattern as yt-dlp)."""
     env = os.environ.get("FFMPEG_BIN")
@@ -1073,7 +1204,14 @@ together at up to your quality setting where YouTube splits them.
 It can start a little slower, and seeking is limited.</p>
 <p style="color:#999">Live items get a <b>Live relay</b> stream:
 the app pulls the live feed itself and hands it to Nuvio as one
-continuous stream.</p>""" % options
+continuous stream.</p>
+<p style="color:#999">You can also delete items from <b>inside
+Nuvio</b>: open an item and pick the <b>Delete</b> entry at the
+bottom of its stream list (for a channel's video it removes the
+whole channel). There is no undo - add the link again to bring
+something back. A deleted item can still show in Nuvio's list
+until the list refreshes; reopening Nuvio, or searching, shows
+the updated list.</p>""" % options
     channel_form = """<form method="post" action="/addchannel" style="margin-top:28px">
 <label>Name (optional)</label>
 <input name="name" placeholder="Channel name - the real one fills in by itself">
@@ -1430,8 +1568,39 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect_absolute(resolved)
             return
 
+    def send_blank_clip(self):
+        """Serve the tiny blank MP4 (see BLANK_CLIP)."""
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(BLANK_CLIP)))
+        self.end_headers()
+        self.wfile.write(BLANK_CLIP)
+
+    def handle_remove(self, raw_id, head_only=False):
+        """Delete a saved item from inside Nuvio: GET /remove/<id>.
+
+        The Delete stream entry points here. A GET removes the id
+        from whichever store holds it and serves the blank clip, so
+        the player shows a harmless blink instead of an error; an
+        unknown id removes nothing and still gets the clip. A HEAD
+        request (players probing the "video" first) only answers
+        headers - it never deletes."""
+        if head_only:
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(BLANK_CLIP)))
+            self.end_headers()
+            return
+        remove_stored_item(unquote(raw_id or ""))
+        self.send_blank_clip()
+
     def do_HEAD(self):
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/remove/"):
+            self.handle_remove(parsed.path[len("/remove/"):], head_only=True)
+            return
         if parsed.path.startswith("/play/"):
             self.handle_play(parsed.path[len("/play/"):], head_only=True)
             return
@@ -1453,6 +1622,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/live/"):
             self.handle_live(path[len("/live/"):])
+            return
+        if path.startswith("/remove/"):
+            self.handle_remove(path[len("/remove/"):])
             return
         if path == "/manifest.json":
             self.send_json(MANIFEST)
@@ -1525,6 +1697,13 @@ class Handler(BaseHTTPRequestHandler):
                         "url": item["url"],
                     },
                 ]
+                streams.append(
+                    delete_stream_entry(
+                        item["id"],
+                        "Delete this item\n%s — removes it from My Magnet Links"
+                        % item["name"],
+                    )
+                )
                 self.send_json({"streams": streams})
                 return
             if item.get("kind") == "youtube":
@@ -1564,6 +1743,32 @@ class Handler(BaseHTTPRequestHandler):
                             % (PORT, item["id"]),
                         }
                     ]
+                # The Delete entry rides last. It points at the
+                # video itself when the video is saved on its own,
+                # and at the whole channel when the video came from
+                # a saved channel (those videos are never stored -
+                # they only exist in the channel cache). A bare id
+                # that is neither gets no Delete entry.
+                chan = cached_channel_of(youtube_video_id(item))
+                if chan:
+                    streams.append(
+                        delete_stream_entry(
+                            chan[0],
+                            "Remove this channel\n%s — removes the channel and its videos"
+                            % (chan[1] or chan[0]),
+                        )
+                    )
+                else:
+                    with LOCK:
+                        saved_ids = {i["id"] for i in load_store(YT_STORE)}
+                    if item["id"] in saved_ids:
+                        streams.append(
+                            delete_stream_entry(
+                                item["id"],
+                                "Delete this item\n%s — removes it from My Magnet Links"
+                                % item["name"],
+                            )
+                        )
                 self.send_json({"streams": streams})
                 return
             streams = [
@@ -1579,6 +1784,20 @@ class Handler(BaseHTTPRequestHandler):
                     "url": item["magnet"],
                 },
             ]
+            # Only a magnet that is actually saved gets the Delete
+            # entry - a magnet Nuvio was handed directly (bare hash
+            # or a pasted magnet URI) is not stored, so there is
+            # nothing to delete.
+            with LOCK:
+                saved_ids = {i["id"] for i in load_store(STORE)}
+            if item["id"] in saved_ids:
+                streams.append(
+                    delete_stream_entry(
+                        item["id"],
+                        "Delete this item\n%s — removes it from My Magnet Links"
+                        % item["name"],
+                    )
+                )
             self.send_json({"streams": streams})
             return
         self.send_json({"error": "not found"}, 404)
