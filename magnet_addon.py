@@ -8,13 +8,19 @@ torrent stream. You can also paste a magnet link straight into Nuvio's
 search bar - it shows up as an item and this addon gives it a Play
 stream the same way.
 
+You can also paste direct web video links (http/https, e.g. an .mp4,
+.mkv or .m3u8 address). They appear in the same catalog and play
+straight from the web - no torrent, no VPN needed. The link has to be
+the video file/stream address itself, not a web page.
+
 No dependencies - Python 3 standard library only.
 Run it on the same Mac as Nuvio:   python3 magnet_addon.py
 Then add  http://127.0.0.1:7777/manifest.json  in Nuvio (Addons ->
 Install by URL). Keep this window open while you watch.
-Playback is P2P torrent streaming - have your VPN on.
+Magnet playback is P2P torrent streaming - have your VPN on.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -24,7 +30,12 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 PORT = int(os.environ.get("PORT", "7777"))
 HERE = os.path.dirname(os.path.abspath(__file__))
-STORE = os.path.join(HERE, "magnets.json")
+_home = os.environ.get("MAGNET_ADDON_HOME")
+DATA_DIR = _home if _home else HERE
+if _home:
+    os.makedirs(DATA_DIR, exist_ok=True)
+STORE = os.path.join(DATA_DIR, "magnets.json")
+LINK_STORE = os.path.join(DATA_DIR, "links.json")
 LOCK = threading.Lock()
 
 DEFAULT_TRACKERS = [
@@ -37,13 +48,13 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "name": "My Magnet Links",
-    "description": "Your own pasted magnet links, playable in Nuvio.",
+    "description": "Your own pasted magnet links and web video links, playable in Nuvio.",
     "logo": "",
     "resources": ["catalog", "meta", "stream"],
     "types": ["movie"],
-    "idPrefixes": ["magnet:"],
+    "idPrefixes": ["magnet:", "link:"],
     "catalogs": [
         {
             "type": "movie",
@@ -56,18 +67,23 @@ MANIFEST = {
 }
 
 
-def load_store():
+def load_store(path=STORE):
     try:
-        with open(STORE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, list) else []
     except Exception:
         return []
 
 
-def save_store(items):
-    with open(STORE, "w", encoding="utf-8") as f:
+def save_store(items, path=STORE):
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
+
+
+def all_items():
+    """Magnets and web links together, each list newest-first."""
+    return load_store(STORE) + load_store(LINK_STORE)
 
 
 def parse_magnet(magnet):
@@ -93,12 +109,47 @@ def parse_magnet(magnet):
     }
 
 
+def parse_link(url, name=""):
+    """Return a store item dict from a web video URL, or None if invalid."""
+    url = (url or "").strip()
+    low = url.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        return None
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return None
+    name = (name or "").strip()
+    if not name:
+        seg = ""
+        for part in parsed.path.split("/"):
+            if part:
+                seg = part
+        seg = unquote(seg)
+        if seg:
+            root, dot, ext = seg.rpartition(".")
+            if dot and root and len(ext) <= 5:
+                seg = root
+            name = seg
+        else:
+            name = parsed.netloc
+    lid = "link:" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+    return {
+        "id": lid,
+        "name": name,
+        "url": url,
+        "kind": "link",
+    }
+
+
 def find_item(item_id):
     item_id = unquote(item_id or "")
     if item_id.lower().startswith("magnet:?"):
         return parse_magnet(item_id)
     with LOCK:
-        for it in load_store():
+        for it in load_store(STORE):
+            if it["id"] == item_id:
+                return it
+        for it in load_store(LINK_STORE):
             if it["id"] == item_id:
                 return it
     # Not saved: still playable from the bare hash.
@@ -116,11 +167,15 @@ def find_item(item_id):
 
 
 def meta_of(item):
+    if item.get("kind") == "link":
+        desc = "Your pasted web video link."
+    else:
+        desc = "Your pasted magnet link (P2P)."
     return {
         "id": item["id"],
         "type": "movie",
         "name": item["name"],
-        "description": "Your pasted magnet link (P2P).",
+        "description": desc,
     }
 
 
@@ -135,17 +190,26 @@ def esc(s):
 
 def configure_page(msg=""):
     with LOCK:
-        items = load_store()
+        magnets = load_store(STORE)
+        links = load_store(LINK_STORE)
     rows = ""
-    for it in items:
+    for it in links:
+        rows += (
+            '<div style="padding:10px 0;border-bottom:1px solid #333">'
+            "<b>%s</b> <small style='color:#7ab'>(web link)</small><br>"
+            "<small style='color:#999'>%s</small><br>"
+            '<a href="/delete?id=%s" style="color:#e66">Delete</a></div>'
+            % (esc(it["name"]), esc(it["url"]), esc(it["id"]))
+        )
+    for it in magnets:
         rows += (
             '<div style="padding:10px 0;border-bottom:1px solid #333">'
             "<b>%s</b><br><small style='color:#999'>%s</small><br>"
             '<a href="/delete?id=%s" style="color:#e66">Delete</a></div>'
             % (esc(it["name"]), esc(it["id"]), esc(it["id"]))
         )
-    if not items:
-        rows = "<p style='color:#999'>No magnets saved yet.</p>"
+    if not magnets and not links:
+        rows = "<p style='color:#999'>Nothing saved yet.</p>"
     note = ('<p style="color:#6f6">%s</p>' % esc(msg)) if msg else ""
     html = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>My Magnet Links</title>
@@ -156,9 +220,12 @@ button{background:#2b6cb0;color:#fff;border:0;padding:12px 20px;border-radius:6p
 a{color:#7ab}</style></head><body>
 <h2>My Magnet Links</h2>
 <p>Install in Nuvio with this URL:<br><code>http://127.0.0.1:%d/manifest.json</code></p>
-<p>Paste a magnet link below. It appears in Nuvio under
-<b>My Magnet Links</b>. Keep this program running while you watch,
-and have your VPN on (playback is P2P).</p>
+<p>Paste a magnet link or a web video link below. Both appear in Nuvio
+under <b>My Magnet Links</b>. Keep this program running while you watch.
+Magnets play peer-to-peer, so have your VPN on for those. Web video
+links play straight from the web - no VPN needed. A web link has to be
+the video file/stream address itself (like .mp4, .mkv or .m3u8),
+not a web page.</p>
 %s
 <form method="post" action="/add">
 <label>Name (optional)</label>
@@ -166,6 +233,13 @@ and have your VPN on (playback is P2P).</p>
 <label>Magnet link</label>
 <textarea name="magnet" rows="3" placeholder="magnet:?xt=urn:btih:..."></textarea>
 <button type="submit">Add magnet</button>
+</form>
+<form method="post" action="/addlink" style="margin-top:28px">
+<label>Name (optional)</label>
+<input name="name" placeholder="Video name">
+<label>Web video link</label>
+<input name="link" placeholder="https://.../movie.mp4">
+<button type="submit">Add web link</button>
 </form>
 <h3>Saved</h3>%s
 </body></html>""" % (PORT, note, rows)
@@ -212,8 +286,8 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(parsed.query)
             did = (q.get("id") or [""])[0]
             with LOCK:
-                items = [i for i in load_store() if i["id"] != did]
-                save_store(items)
+                save_store([i for i in load_store(STORE) if i["id"] != did], STORE)
+                save_store([i for i in load_store(LINK_STORE) if i["id"] != did], LINK_STORE)
             self.redirect("/configure")
             return
         # /catalog/movie/mymagnets[.json|/search=..json]
@@ -225,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             if extra.startswith("search="):
                 search = unquote(extra[len("search="):]).lower()
             with LOCK:
-                items = load_store()
+                items = all_items()
             metas = [meta_of(i) for i in items if not search or search in i["name"].lower()]
             self.send_json({"metas": metas})
             return
@@ -239,6 +313,16 @@ class Handler(BaseHTTPRequestHandler):
             item = find_item(m.group(1))
             if not item:
                 self.send_json({"streams": []})
+                return
+            if item.get("kind") == "link":
+                streams = [
+                    {
+                        "name": "Web link",
+                        "title": item["name"] + "\nDirect web stream",
+                        "url": item["url"],
+                    },
+                ]
+                self.send_json({"streams": streams})
                 return
             streams = [
                 {
@@ -271,9 +355,24 @@ class Handler(BaseHTTPRequestHandler):
             if name:
                 item["name"] = name
             with LOCK:
-                items = [i for i in load_store() if i["id"] != item["id"]]
+                items = [i for i in load_store(STORE) if i["id"] != item["id"]]
                 items.insert(0, item)
-                save_store(items)
+                save_store(items, STORE)
+            self.redirect("/configure")
+            return
+        if parsed.path == "/addlink":
+            length = int(self.headers.get("Content-Length") or 0)
+            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            link = (form.get("link") or [""])[0]
+            name = (form.get("name") or [""])[0].strip()
+            item = parse_link(link, name)
+            if not item:
+                self.send_html(configure_page("That web link did not parse - it has to start with http:// or https://. Nothing saved."))
+                return
+            with LOCK:
+                items = [i for i in load_store(LINK_STORE) if i["id"] != item["id"]]
+                items.insert(0, item)
+                save_store(items, LINK_STORE)
             self.redirect("/configure")
             return
         self.send_json({"error": "not found"}, 404)

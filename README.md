@@ -58,6 +58,14 @@ Saved magnets live outside the app, in `~/Library/Application Support/My Magnet 
 
 Your saved magnets stay saved (in `magnets.json` next to the script) — you only paste each one once. You can delete them from the same configure page.
 
+## Web video links
+
+You can also play videos straight from a web address. On the same `/configure` page there's a second form, **Web video link**: paste a direct video address (for example an `.mp4`, `.mkv` or `.m3u8` link), give it a name if you like, and save. It appears in the same **My Magnet Links** catalog in Nuvio, and tapping it plays the file straight from the web — no torrent, so no VPN needed for these.
+
+One catch: the address has to be the video file/stream address itself. A web *page* address (a page that has a player on it) won't work — the addon can only hand Nuvio a direct video address.
+
+Saved web links live in their own file, `links.json`, next to `magnets.json`, and you can delete them from the configure page too.
+
 ## Notes
 
 - The addon only hands Nuvio the magnet link; the video itself streams from the torrent through Nuvio.
