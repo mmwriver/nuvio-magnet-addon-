@@ -50,6 +50,10 @@ My Magnet Links.app/
 
 Saved magnets live outside the app, in `~/Library/Application Support/My Magnet Links/magnets.json`, so they survive app updates — and the app adopts the magnets you saved with the script version the first time it runs. First launch: right-click the app and choose **Open** (it's unsigned), or allow it under **System Settings → Privacy & Security → Open Anyway**.
 
+## The one paste box
+
+The `/configure` page has one main box at the top: **Paste any link**. Paste a magnet link, a web video address, or a YouTube link — the addon works out which kind it is and files it in the right place. The three separate boxes further down the page still work too; they're the same thing, one kind at a time.
+
 ## Adding a magnet link
 
 1. With the addon running, open the first address it printed (the one ending in `/configure`) in your browser.
@@ -66,9 +70,34 @@ One catch: the address has to be the video file/stream address itself. A web *pa
 
 Saved web links live in their own file, `links.json`, next to `magnets.json`, and you can delete them from the configure page too.
 
+## YouTube videos
+
+You can also add YouTube videos — regular videos and live streams. On the same `/configure` page there's a third form, **YouTube link**: paste a YouTube address (`youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/live/...` and similar), give it a name if you like, and save. It appears in the same **My Magnet Links** catalog.
+
+When you press play in Nuvio, the addon asks [yt-dlp](https://github.com/yt-dlp/yt-dlp) for a direct stream address at that moment — so yt-dlp must be installed on the same computer, and the first play can take a few seconds. Live streams work the same way.
+
+If you add a YouTube video without a name, the addon fills in the video's **real title** automatically (it asks yt-dlp when you save). YouTube items also show the **video's picture** in Nuvio — the catalog and detail pages use the video's own thumbnail as the poster.
+
+Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for 10 minutes for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
+
+### YouTube quality setting
+
+The `/configure` page has a **YouTube quality** setting (Best available, 1080p, 720p, 480p, 360p; 720p is the default). It caps the height of the stream the addon asks yt-dlp for, and it lives in `settings.json` next to `magnets.json`.
+
+One limit to know: YouTube hands this player a single combined file (picture and sound in one stream — the player can't use separate picture-only and sound-only streams). So the addon takes the best combined stream at or under your pick — and on some networks/accounts the only combined stream YouTube offers is a low one (360p), even if you pick higher. The setting still does its job; there just isn't a higher combined stream to give you for that video.
+
+### HD merge stream (1080p)
+
+With the quality set to **1080p** or **Best available**, regular YouTube videos get a second stream listed first: **YouTube HD (merge)**. YouTube's higher resolutions only come as separate picture-only and sound-only streams, so when you pick the merge stream the addon joins them together live with [ffmpeg](https://ffmpeg.org) (which must be installed on the same computer) and serves the combined video itself, at up to 1080p with the best H.264 picture and AAC sound the video offers.
+
+Trade-offs to know: the merge starts slower than the plain stream (the addon has to look the video up and start joining before the first picture shows), and seeking/scrubbing is limited because the video is being built as it plays. The plain stream stays listed underneath as a fallback — if the merge can't be built for a video, the addon sends you to the plain stream instead. Live streams are unaffected: they keep using the plain stream, merge or not.
+
+Saved YouTube videos live in their own file, `youtube.json`, next to `magnets.json`, and you can delete them from the configure page too.
+
 ## Notes
 
 - The addon only hands Nuvio the magnet link; the video itself streams from the torrent through Nuvio.
+- Newly added items should now show up in Nuvio without restarting it — the addon tells Nuvio not to cache its lists. If the app still shows an old list, that last bit of caching is on Nuvio's side.
 - If you close the addon window, whatever is already playing keeps going, but starting anything new needs the addon running again.
 - Port 7777 is used by default; set the `PORT` environment variable to change it.
 
