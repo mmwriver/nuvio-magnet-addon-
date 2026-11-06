@@ -22,5 +22,14 @@ fi
 # Open the configure page once the server has had a moment to start.
 (sleep 1.5; open "http://127.0.0.1:7777/configure") &
 
+# The script that runs lives in the data dir, not in the bundle:
+# the running app can then update it in place (its own Update button)
+# without the bundle ever changing, so macOS only has to approve the
+# app once. The bundled copy is just the seed for the first run.
+SCRIPT="$DATA/magnet_addon.py"
+if [ ! -f "$SCRIPT" ]; then
+  cp "$RESOURCES/magnet_addon.py" "$SCRIPT"
+fi
+
 PYTHON="$(command -v python3 || echo /usr/bin/python3)"
-exec env MAGNET_ADDON_HOME="$DATA" "$PYTHON" "$RESOURCES/magnet_addon.py"
+exec env MAGNET_ADDON_HOME="$DATA" "$PYTHON" "$SCRIPT"
