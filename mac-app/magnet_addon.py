@@ -15,13 +15,14 @@ the video file/stream address itself, not a web page.
 
 You can also paste YouTube links (regular videos and live streams).
 They appear in the same catalog too. When you press play, the addon
-asks yt-dlp (which must be installed on this Mac) for a direct stream
+asks yt-dlp (which must be installed on this Mac) for the stream
 address, so the first play can take a few seconds. A YouTube quality
-setting on the web page caps how high that stream can go. With the
-quality on 1080p or Best, regular YouTube videos also get an HD merge
-stream: the addon joins YouTube's separate picture and sound streams
-together with ffmpeg as it plays (starts slower, seeking is limited).
-Live streams list only a relay stream: YouTube's live
+setting on the web page caps how high the picture can go. Every
+YouTube item plays through the addon itself - the stream list shows
+a single relay entry per item, no direct links: for regular videos
+the addon joins YouTube's separate picture and sound streams
+together with ffmpeg as it plays (starts slower, seeking is
+limited). Live streams list only a relay stream: YouTube's live
 playlists only hand out a short window of video at a time and expect
 the player to keep re-asking for more, which some players don't keep
 up with - playback stops when the window runs out. So for live items
@@ -32,6 +33,8 @@ You can also add whole YouTube channels. A channel's newest uploads
 (up to ten) appear in the same catalog on their own: the addon
 re-checks each channel about every half hour while it runs, so new
 uploads show up by themselves without you pasting anything else.
+Each one is labeled in the list with its channel's name -
+"Channel name — video title" - so you can tell where it came from.
 Channel videos play exactly like individually pasted YouTube videos.
 
 YouTube fetches use a browser cookies file when one is around - the
@@ -157,7 +160,7 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "name": "My Magnet Links",
     "description": "Your own pasted magnet links, web video links, YouTube videos and channels, playable in Nuvio.",
     "logo": "",
@@ -814,6 +817,40 @@ def channel_videos(channel):
     return hit[0] if hit else []
 
 
+def channel_display_name(channel_name, title):
+    """The catalog display name for one of a channel's uploads:
+    "<Channel name> — <video title>", so the list in Nuvio says
+    which channel each video came from. Falls back to the plain
+    title when the channel has no name."""
+    channel_name = (channel_name or "").strip()
+    return (channel_name + " — " + title) if channel_name else title
+
+
+def cached_channel_display_name(vid):
+    """The channel display name for a video id, when a saved
+    channel's uploads are already cached in memory - else None.
+    Memory only: this never triggers a fetch, so it is safe to call
+    from endpoints that should answer fast (the meta endpoint)."""
+    with CACHE_LOCK:
+        per_channel = [
+            (cid, list(videos)) for cid, (videos, _ts) in _channel_cache.items()
+        ]
+    found = None
+    for cid, videos in per_channel:
+        for v, title in videos:
+            if v == vid:
+                found = (cid, title)
+                break
+        if found:
+            break
+    if not found:
+        return None
+    cid, title = found
+    with LOCK:
+        names = {c["id"]: c.get("name") for c in load_store(CHANNEL_STORE)}
+    return channel_display_name(names.get(cid), title)
+
+
 def find_ffmpeg():
     """Locate an ffmpeg binary, or None (same lookup pattern as yt-dlp)."""
     env = os.environ.get("FFMPEG_BIN")
@@ -1017,11 +1054,11 @@ YouTube hands this player a single combined file, so the app takes the
 best combined stream at or under your pick.</p>
 <button type="submit">Save quality</button>
 </form>
-<p style="color:#999">With quality on 1080p or Best, regular YouTube
-videos also get an <b>HD merge</b> stream listed first: the app joins
-YouTube's separate picture and sound streams together as it plays. It
-starts slower and seeking is limited; the plain stream stays listed as
-a fallback.</p>
+<p style="color:#999">YouTube videos play through the app's own
+<b>relay</b> stream - the app fetches the video and serves it to
+Nuvio itself, joining YouTube's separate picture and sound streams
+together at up to your quality setting where YouTube splits them.
+It can start a little slower, and seeking is limited.</p>
 <p style="color:#999">Live items get a <b>Live relay</b> stream:
 the app pulls the live feed itself and hands it to Nuvio as one
 continuous stream.</p>""" % options
@@ -1433,7 +1470,7 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     seen.add(vid)
                     virtual = synth_youtube_item(vid)
-                    virtual["name"] = title
+                    virtual["name"] = channel_display_name(ch.get("name"), title)
                     items.append(virtual)
             metas = [meta_of(i) for i in items if not search or search in i["name"].lower()]
             self.send_json({"metas": metas})
@@ -1441,6 +1478,18 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/meta/movie/(.+)\.json$", path)
         if m:
             item = find_item(m.group(1))
+            if item and item.get("kind") == "youtube":
+                # A video that came from a saved channel carries the
+                # channel's name in the list ("<Channel> — <title>");
+                # serve the same name here when the channel's
+                # uploads are in memory. A copy saved individually
+                # keeps its own name.
+                with LOCK:
+                    saved_ids = {i["id"] for i in load_store(YT_STORE)}
+                if item["id"] not in saved_ids:
+                    disp = cached_channel_display_name(youtube_video_id(item))
+                    if disp:
+                        item["name"] = disp
             self.send_json({"meta": meta_of(item)} if item else {"meta": None})
             return
         m = re.match(r"^/stream/movie/(.+)\.json$", path)
@@ -1461,22 +1510,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if item.get("kind") == "youtube":
                 resolved = resolve_youtube(item)
-                plain = None
-                if resolved:
-                    plain = {
-                        "name": "YouTube",
-                        "title": item["name"] + "\nYouTube stream",
-                        "url": resolved,
-                    }
-                streams = []
-                if plain and _is_hls_url(resolved):
+                if resolved and _is_hls_url(resolved):
                     # Live: only the relay. The addon follows the
                     # live playlist itself and feeds the player one
                     # continuous stream - a player handed the
                     # playlist directly can run out of segments and
                     # stop, so the direct stream is not listed at
                     # all. The HD merge doesn't apply to live either.
-                    streams.append(
+                    streams = [
                         {
                             "name": "YouTube Live (relay)",
                             "title": item["name"]
@@ -1484,20 +1525,26 @@ class Handler(BaseHTTPRequestHandler):
                             "url": "http://127.0.0.1:%d/live/%s"
                             % (PORT, item["id"]),
                         }
-                    )
+                    ]
                 else:
-                    if load_settings()["quality"] in ("1080", "best"):
-                        streams.append(
-                            {
-                                "name": "YouTube HD (merge)",
-                                "title": item["name"]
-                                + "\n1080p merge — app joins picture+sound live",
-                                "url": "http://127.0.0.1:%d/play/%s"
-                                % (PORT, item["id"]),
-                            }
-                        )
-                    if plain:
-                        streams.append(plain)
+                    # Everything else plays through the app too: the
+                    # direct stream links proved unreliable, so a
+                    # YouTube item lists exactly one stream - the
+                    # /play/ relay - at every quality setting. Inside
+                    # /play/ the addon merges the separate picture and
+                    # sound streams at the quality cap, and a video it
+                    # can't merge still plays through the fallback
+                    # there, so nothing is lost by not listing the
+                    # direct link.
+                    streams = [
+                        {
+                            "name": "YouTube (relay)",
+                            "title": item["name"]
+                            + "\nApp-served stream — the app feeds the video",
+                            "url": "http://127.0.0.1:%d/play/%s"
+                            % (PORT, item["id"]),
+                        }
+                    ]
                 self.send_json({"streams": streams})
                 return
             streams = [

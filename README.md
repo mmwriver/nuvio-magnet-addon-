@@ -74,11 +74,16 @@ Saved web links live in their own file, `links.json`, next to `magnets.json`, an
 
 You can also add YouTube videos — regular videos and live streams. On the same `/configure` page there's a third form, **YouTube link**: paste a YouTube address (`youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/live/...` and similar), give it a name if you like, and save. It appears in the same **My Magnet Links** catalog.
 
-When you press play in Nuvio, the addon asks [yt-dlp](https://github.com/yt-dlp/yt-dlp) for a direct stream address at that moment — so yt-dlp must be installed on the same computer, and the first play can take a few seconds. Live streams work the same way.
+When you press play in Nuvio, the addon asks [yt-dlp](https://github.com/yt-dlp/yt-dlp) for the video's stream address at that moment and then serves the video itself — so yt-dlp must be installed on the same computer, and the first play can take a few seconds. Live streams work the same way, through the live relay.
 
 If you add a YouTube video without a name, the addon fills in the video's **real title** automatically (it asks yt-dlp when you save). YouTube items also show the **video's picture** in Nuvio — the catalog and detail pages use the video's own thumbnail as the poster.
 
 Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for a minute for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
+
+### Fix in 1.6.1
+
+- **Channel videos are labeled with their channel.** In the catalog, each of a channel's uploads shows as "Channel Name — Video Title", so you can tell which channel it came from.
+- **All YouTube playback goes through the addon.** Regular YouTube videos used to list a direct stream link (with the HD merge entry in front of it at 1080p/Best); the direct link didn't play reliably, so every YouTube item — regular videos and live streams alike — now lists a single app-served **relay** stream, and the addon itself fetches and serves the video. (Matthew's call.)
 
 ### Fix in 1.5.3
 
@@ -99,11 +104,11 @@ The `/configure` page has a **YouTube quality** setting (Best available, 1080p, 
 
 One limit to know: YouTube hands this player a single combined file (picture and sound in one stream — the player can't use separate picture-only and sound-only streams). So the addon takes the best combined stream at or under your pick — and on some networks/accounts the only combined stream YouTube offers is a low one (360p), even if you pick higher. The setting still does its job; there just isn't a higher combined stream to give you for that video.
 
-### HD merge stream (1080p)
+### HD merge (inside the relay stream)
 
-With the quality set to **1080p** or **Best available**, regular YouTube videos get a second stream listed first: **YouTube HD (merge)**. YouTube's higher resolutions only come as separate picture-only and sound-only streams, so when you pick the merge stream the addon joins them together live with [ffmpeg](https://ffmpeg.org) (which must be installed on the same computer) and serves the combined video itself, at up to 1080p with the best H.264 picture and AAC sound the video offers.
+Every YouTube item lists a single app-served **relay** stream, and the merge happens inside it. YouTube's higher resolutions only come as separate picture-only and sound-only streams, so the addon joins them together live with [ffmpeg](https://ffmpeg.org) (which must be installed on the same computer) and serves the combined video itself, at up to the quality setting (up to 1080p) with the best H.264 picture and AAC sound the video offers.
 
-Trade-offs to know: the merge starts slower than the plain stream (the addon has to look the video up and start joining before the first picture shows), and seeking/scrubbing is limited because the video is being built as it plays. The plain stream stays listed underneath as a fallback — if the merge can't be built for a video, the addon sends you to the plain stream instead. Live streams are unaffected: they keep using the plain stream, merge or not.
+Trade-offs to know: the relay starts slower than a direct link would (the addon has to look the video up and start joining before the first picture shows), and seeking/scrubbing is limited because the video is being built as it plays. If a merge can't be built for a video, the addon sends the player to the plain combined stream instead, so it still plays. Live streams are unaffected by the merge: they use the live relay.
 
 Saved YouTube videos live in their own file, `youtube.json`, next to `magnets.json`, and you can delete them from the configure page too.
 
@@ -111,7 +116,7 @@ Saved YouTube videos live in their own file, `youtube.json`, next to `magnets.js
 
 You can now follow whole YouTube channels, not just single videos. On the `/configure` page there's a fourth form, **YouTube channel link**: paste a channel address (`youtube.com/@channelname`, `youtube.com/channel/UC...`, `youtube.com/c/...` or `youtube.com/user/...` — a tab suffix like `/videos` is fine), give it a name if you like, and save. The one paste box at the top also recognises channel links and files them the same way. A channel's real name fills in automatically when you don't type one.
 
-The channel's **newest 10 uploads** then appear in the same **My Magnet Links** catalog, after your own saved items. The addon re-checks each channel about **every 30 minutes** while it runs, so new uploads show up on their own — you don't paste anything else. If a re-check fails, the last good list stays in place rather than the channel's videos vanishing.
+The channel's **newest 10 uploads** then appear in the same **My Magnet Links** catalog, after your own saved items. In the list, each channel video is labeled with the channel's name — "Channel Name — Video Title" — so it's clear which channel it came from. The addon re-checks each channel about **every 30 minutes** while it runs, so new uploads show up on their own — you don't paste anything else. If a re-check fails, the last good list stays in place rather than the channel's videos vanishing.
 
 Channel videos play exactly like individually pasted YouTube videos — same quality setting, same HD merge, and if an upload is a live stream it gets the live relay. (The catalog lists a channel's uploads; a channel's *current* live stream lives on its streams tab, so to pin a live channel, add its live video link as a regular YouTube item.)
 
