@@ -78,7 +78,16 @@ When you press play in Nuvio, the addon asks [yt-dlp](https://github.com/yt-dlp/
 
 If you add a YouTube video without a name, the addon fills in the video's **real title** automatically (it asks yt-dlp when you save). YouTube items also show the **video's picture** in Nuvio — the catalog and detail pages use the video's own thumbnail as the poster.
 
-Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for 10 minutes for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
+Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for a minute for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
+
+### Fix in 1.5.2
+
+- **Live relay.** A YouTube live playlist only hands out a short window of video at a time (about 30 seconds) and expects the player to keep re-asking for the next window — and Nuvio's player doesn't keep up, so live playback stopped after a few seconds even on a fast connection. Live items now list a **YouTube Live (relay)** stream first: the addon follows the live playlist itself with ffmpeg and hands Nuvio one continuous stream, so there's no window to run out of. The direct stream is still listed second, unchanged, if you prefer it.
+
+### Fixes in 1.5.1
+
+- **Cookies are found automatically.** YouTube fetches need a browser cookies file on some networks. The addon used to look in exactly one place (`~/Downloads/cookies.txt`); it now also finds the file Opera's "Get cookies.txt LOCALLY" extension saves (`www.youtube.com_cookies.txt` in `~/Downloads/Temp`) and any other cookies export in Downloads. If your exported cookies have gone stale — browsers rotate them — the addon now retries without cookies instead of failing every video.
+- **Live streams behave better.** A live stream's address is re-fetched every minute instead of being remembered for ten, so it can't go stale mid-session. Live items no longer list the HD merge entry (it never applied to live), and when YouTube offers an adaptive master playlist for a live stream, the addon hands Nuvio that — the player can drop to a lower quality on a slow connection instead of stalling on one fixed quality.
 
 ### YouTube quality setting
 

@@ -21,7 +21,19 @@ setting on the web page caps how high that stream can go. With the
 quality on 1080p or Best, regular YouTube videos also get an HD merge
 stream: the addon joins YouTube's separate picture and sound streams
 together with ffmpeg as it plays (starts slower, seeking is limited).
-Live streams are unaffected by the merge.
+Live streams get a relay stream listed first: YouTube's live
+playlists only hand out a short window of video at a time and expect
+the player to keep re-asking for more, which some players don't keep
+up with - playback stops when the window runs out. So for live items
+the addon pulls the feed itself with ffmpeg and hands Nuvio one
+continuous stream instead. The plain stream stays listed second -
+the adaptive master playlist when YouTube offers one, so the player
+can step down on a slow connection instead of stalling.
+
+YouTube fetches use a browser cookies file when one is around - the
+addon finds it by itself in Downloads, including the file Opera's
+cookies extension saves in Downloads/Temp - and if the exported
+cookies have gone stale it retries without them rather than failing.
 
 One paste box on the web page takes any of the three link kinds and
 sorts out which it is. YouTube items show their video's picture in
@@ -45,8 +57,9 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, urljoin
 
 PORT = int(os.environ.get("PORT", "7777"))
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -78,7 +91,7 @@ LOCK = threading.Lock()
 # cached the same way; a pair is only ever cached for a non-live item,
 # so a cache hit also settles the live check.
 RESOLVE_TTL = 4 * 3600
-LIVE_TTL = 10 * 60
+LIVE_TTL = 60
 PAIR_TTL = 4 * 3600
 CACHE_LOCK = threading.Lock()
 _resolve_cache = {}  # (video_id, quality) -> (url, timestamp)
@@ -132,7 +145,7 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.5.0",
+    "version": "1.5.2",
     "name": "My Magnet Links",
     "description": "Your own pasted magnet links, web video links and YouTube videos, playable in Nuvio.",
     "logo": "",
@@ -286,6 +299,70 @@ def find_ytdlp():
     return None
 
 
+_cookies_cache = {"done": False, "path": None}
+
+
+def find_cookies(refresh=False):
+    """Locate a browser cookies file for yt-dlp, or None.
+
+    Opera's "Get cookies.txt LOCALLY" extension saves its export as
+    "www.youtube.com_cookies.txt" inside ~/Downloads/Temp, NOT as
+    ~/Downloads/cookies.txt - checking only the textbook path means
+    running with no cookies at all and hitting YouTube's bot wall.
+    So search, in order: ~/Downloads/cookies.txt,
+    ~/Downloads/Temp/cookies.txt,
+    ~/Downloads/Temp/www.youtube.com_cookies.txt,
+    ~/Downloads/www.youtube.com_cookies.txt, then any *cookies*.txt in
+    ~/Downloads/Temp or ~/Downloads, newest first. The first existing
+    non-empty file wins. The result is cached for the process; pass
+    refresh=True to search again (callers do that once when a fetch
+    fails, in case the file was exported in the meantime)."""
+    if _cookies_cache["done"] and not refresh:
+        return _cookies_cache["path"]
+    downloads = os.path.expanduser("~/Downloads")
+    temp = os.path.join(downloads, "Temp")
+    candidates = [
+        os.path.join(downloads, "cookies.txt"),
+        os.path.join(temp, "cookies.txt"),
+        os.path.join(temp, "www.youtube.com_cookies.txt"),
+        os.path.join(downloads, "www.youtube.com_cookies.txt"),
+    ]
+
+    def usable(path):
+        try:
+            return os.path.isfile(path) and os.path.getsize(path) > 0
+        except OSError:
+            return False
+
+    found = None
+    for cand in candidates:
+        if usable(cand):
+            found = cand
+            break
+    if not found:
+        pool = []
+        for folder in (temp, downloads):
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                continue
+            for name in names:
+                low = name.lower()
+                if "cookies" in low and low.endswith(".txt"):
+                    path = os.path.join(folder, name)
+                    if usable(path):
+                        try:
+                            pool.append((os.path.getmtime(path), path))
+                        except OSError:
+                            pass
+        if pool:
+            pool.sort(reverse=True)
+            found = pool[0][1]
+    _cookies_cache["done"] = True
+    _cookies_cache["path"] = found
+    return found
+
+
 def _ytdlp_get(ytdlp, base, extra, fmt, url):
     """One yt-dlp -g attempt. Returns the URL only when the attempt yields
     exactly one http line - a combined stream. Zero or 2+ lines (a split
@@ -314,40 +391,15 @@ def youtube_video_id(item):
     return m.group(1) if m else iid
 
 
-def resolve_youtube(item):
-    """Ask yt-dlp for a direct stream URL for a YouTube item.
-
-    Honors the quality setting (a height cap; "best" is uncapped).
-    Client ladder, first success wins:
-      1. android_vr client, capped format
-      2. android_vr client, "best"
-      3. default client, capped format
-      4. default client, "best" (only when capped)
-      5. tv client, capped format
-      6. ios client, capped format
-    android_vr goes first: on some networks/accounts it is the only
-    client that offers a combined format at all, and walking the other
-    clients first just burns seconds before it answers. (Some clients
-    only hand out split audio/video formats, where no combined "best"
-    exists; the ladder still walks them as a fallback.) Works for
-    regular videos (direct file URL) and live streams (an .m3u8 URL).
-    Results are cached in memory - 4 hours for regular streams, 10
-    minutes for live manifests. Returns None on any failure.
-    """
-    quality = load_settings()["quality"]
-    vid = youtube_video_id(item)
-    cached = cache_resolve_get(vid, quality)
-    if cached:
-        return cached
-    ytdlp = find_ytdlp()
-    if not ytdlp:
-        return None
-    capped = None if quality == "best" else int(quality)
-    fmt = "best" if capped is None else "best[height<=%d]/best" % capped
-    cookies = os.path.expanduser("~/Downloads/cookies.txt")
+def _resolve_ladder(ytdlp, item_url, fmt, capped, cookies_path):
+    """Walk the client ladder once and return the first combined stream
+    URL, or None. cookies_path may be None (fetch without cookies).
+    Ladder order (android_vr first - see resolve_youtube):
+      android_vr capped, android_vr "best", default capped,
+      default "best" (only when capped), tv capped, ios capped."""
     base = [ytdlp, "-g", "--no-warnings"]
-    if os.path.isfile(cookies):
-        base += ["--cookies", cookies]
+    if cookies_path:
+        base += ["--cookies", cookies_path]
 
     def client_args(name):
         if name is None:
@@ -360,52 +412,209 @@ def resolve_youtube(item):
     ladder.append(("tv", fmt))
     ladder.append(("ios", fmt))
     seen = set()
-    unique_ladder = []
-    for step in ladder:
-        if step not in seen:
-            seen.add(step)
-            unique_ladder.append(step)
-    for client, f in unique_ladder:
-        url = _ytdlp_get(ytdlp, base, client_args(client), f, item["url"])
+    for client, f in ladder:
+        if (client, f) in seen:
+            continue
+        seen.add((client, f))
+        url = _ytdlp_get(ytdlp, base, client_args(client), f, item_url)
         if url:
-            cache_resolve_put(vid, quality, url)
             return url
     return None
+
+
+def live_master_url(item):
+    """For a live YouTube item, the adaptive master playlist URL from
+    the yt-dlp -j dump, or None. HLS formats carry it as manifest_url:
+    an .../api/manifest/hls_variant/... URL (no single variant locked
+    in) whose playlist lists every variant, so the player can adapt to
+    the connection. The formats' own url fields are hls_playlist URLs
+    pinned to one variant each. Identified by the hls_variant path
+    segment - the signed URL itself is used exactly as served."""
+    info = youtube_info(item)
+    if not info or not info.get("is_live"):
+        return None
+    for f in (info.get("formats") or []):
+        mu = f.get("manifest_url") or ""
+        if "/api/manifest/hls_variant/" in mu:
+            return mu
+    return None
+
+
+def pick_live_variant(master_url):
+    """Pick the (video, audio) playlist pair out of a live master
+    playlist, or None. Fetches the playlist and scans its
+    #EXT-X-STREAM-INF entries for the highest-bandwidth one whose
+    video codec is avc1 (H.264) - the relay copies the stream into an
+    MP4 without re-encoding, and a VP9/AV1 variant would produce a
+    file some players can't handle.
+
+    The variant playlist alone is NOT enough: YouTube's variant
+    playlists carry video only, and the sound lives in a separate
+    #EXT-X-MEDIA audio rendition (the group the variant's AUDIO
+    attribute names). So the return is (variant_url, audio_url) -
+    audio_url is the group's DEFAULT rendition (or its first), or
+    None when the master names no audio group. ffmpeg follows both
+    playlists itself, reloading them as new segments appear, which is
+    the whole point of the relay. Any failure - fetch error, no avc1
+    variant - returns None and the caller uses the master URL
+    itself."""
+    try:
+        req = urllib.request.Request(
+            master_url, headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            text = resp.read(262144).decode("utf-8", "replace")
+    except Exception:
+        return None
+    lines = text.splitlines()
+    audio_groups = {}  # group id -> [(is_default, url), ...]
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("#EXT-X-MEDIA:") or "TYPE=AUDIO" not in line:
+            continue
+        gm = re.search(r'GROUP-ID="([^"]+)"', line)
+        um = re.search(r'URI="([^"]+)"', line)
+        if gm and um:
+            audio_groups.setdefault(gm.group(1), []).append(
+                ("DEFAULT=YES" in line, urljoin(master_url, um.group(1)))
+            )
+    best = None  # (bandwidth, variant_url, audio_group)
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line.startswith("#EXT-X-STREAM-INF"):
+            continue
+        attrs = line.split(":", 1)[1] if ":" in line else ""
+        cm = re.search(r'CODECS="([^"]+)"', attrs)
+        codecs = cm.group(1) if cm else ""
+        first = codecs.split(",")[0].strip().lower()
+        if not first.startswith("avc1"):
+            continue
+        bw = 0
+        bm = re.search(r"BANDWIDTH=(\d+)", attrs)
+        if bm:
+            bw = int(bm.group(1))
+        am = re.search(r'AUDIO="([^"]+)"', attrs)
+        group = am.group(1) if am else None
+        # The variant URL is the next non-empty, non-tag line.
+        for nxt in lines[i + 1:]:
+            nxt = nxt.strip()
+            if not nxt:
+                continue
+            if nxt.startswith("#"):
+                break
+            if best is None or bw > best[0]:
+                best = (bw, urljoin(master_url, nxt), group)
+            break
+    if not best:
+        return None
+    audio_url = None
+    renditions = audio_groups.get(best[2] or "", [])
+    if renditions:
+        audio_url = next(
+            (u for is_default, u in renditions if is_default), renditions[0][1]
+        )
+    return (best[1], audio_url)
+
+
+def resolve_youtube(item):
+    """Ask yt-dlp for a direct stream URL for a YouTube item.
+
+    Honors the quality setting (a height cap; "best" is uncapped).
+    The client ladder (see _resolve_ladder) tries android_vr first:
+    on some networks/accounts it is the only client that offers a
+    combined format at all, and walking the other clients first just
+    burns seconds before it answers. (Some clients only hand out split
+    audio/video formats, where no combined "best" exists; the ladder
+    still walks them as a fallback.) Works for regular videos (direct
+    file URL) and live streams (an .m3u8 URL - the adaptive master
+    playlist when YouTube exposes one, so the player can step down on
+    a slow connection instead of stalling on a pinned variant).
+
+    Cookies: the ladder runs with the cookies file find_cookies()
+    turns up. If every attempt with cookies fails, the ladder runs
+    once more WITHOUT cookies before giving up - browsers rotate
+    exported cookies, and a stale file can fail every client while
+    the same fetch succeeds with no cookies at all.
+
+    Results are cached in memory - 4 hours for regular streams, a
+    minute for live manifests. Returns None on any failure.
+    """
+    quality = load_settings()["quality"]
+    vid = youtube_video_id(item)
+    cached = cache_resolve_get(vid, quality)
+    if cached:
+        return cached
+    ytdlp = find_ytdlp()
+    if not ytdlp:
+        return None
+    capped = None if quality == "best" else int(quality)
+    fmt = "best" if capped is None else "best[height<=%d]/best" % capped
+    url = None
+    cookies_path = find_cookies()
+    if cookies_path:
+        url = _resolve_ladder(ytdlp, item["url"], fmt, capped, cookies_path)
+        if not url:
+            # The cookies file may have been exported (or moved) since
+            # the cached lookup - search once more before falling back.
+            fresh = find_cookies(refresh=True)
+            if fresh and fresh != cookies_path:
+                url = _resolve_ladder(ytdlp, item["url"], fmt, capped, fresh)
+        if not url:
+            url = _resolve_ladder(ytdlp, item["url"], fmt, capped, None)
+    else:
+        url = _resolve_ladder(ytdlp, item["url"], fmt, capped, None)
+    if not url:
+        return None
+    if _is_hls_url(url):
+        master = live_master_url(item)
+        if master:
+            url = master
+    cache_resolve_put(vid, quality, url)
+    return url
 
 
 def fetch_youtube_title(url):
     """Best-effort real title for a YouTube video via yt-dlp, or None.
     Default client first, android_vr as the retry (the same pattern as
-    youtube_info). Any failure just means the caller keeps the default
-    name, so adding a video never breaks over a title lookup."""
+    youtube_info). If a cookies file was used and both attempts fail,
+    both are retried without cookies (exported cookies go stale).
+    Any failure just means the caller keeps the default name, so
+    adding a video never breaks over a title lookup."""
     ytdlp = find_ytdlp()
     if not ytdlp:
         return None
-    cookies = os.path.expanduser("~/Downloads/cookies.txt")
-    base = [ytdlp, "--no-warnings", "--print", "%(title)s"]
-    if os.path.isfile(cookies):
-        base += ["--cookies", cookies]
     attempts = [
         [],
         ["--extractor-args", "youtube:player_client=android_vr"],
     ]
-    for extra in attempts:
-        try:
-            out = subprocess.run(
-                base + extra + ["--", url],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if out.returncode != 0:
+
+    def try_all(cookies_path):
+        base = [ytdlp, "--no-warnings", "--print", "%(title)s"]
+        if cookies_path:
+            base += ["--cookies", cookies_path]
+        for extra in attempts:
+            try:
+                out = subprocess.run(
+                    base + extra + ["--", url],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if out.returncode != 0:
+                    continue
+                for ln in (out.stdout or "").splitlines():
+                    title = ln.strip()
+                    if title:
+                        return title[:120]
+            except Exception:
                 continue
-            for ln in (out.stdout or "").splitlines():
-                title = ln.strip()
-                if title:
-                    return title[:120]
-        except Exception:
-            continue
-    return None
+        return None
+
+    cookies_path = find_cookies()
+    title = try_all(cookies_path)
+    if not title and cookies_path:
+        title = try_all(None)
+    return title
 
 
 def find_ffmpeg():
@@ -428,34 +637,48 @@ def find_ffmpeg():
 
 def youtube_info(item):
     """One yt-dlp -j dump for a YouTube item, or None on any failure.
-    Default client first, android_vr as the retry."""
+    Default client first, android_vr as the retry. If a cookies file
+    was used and both attempts fail, the search runs once more (the
+    file may have been exported since) and then both attempts are
+    retried without cookies (exported cookies go stale)."""
     ytdlp = find_ytdlp()
     if not ytdlp:
         return None
-    cookies = os.path.expanduser("~/Downloads/cookies.txt")
-    base = [ytdlp, "-j", "--no-warnings"]
-    if os.path.isfile(cookies):
-        base += ["--cookies", cookies]
     attempts = [
         [],
         ["--extractor-args", "youtube:player_client=android_vr"],
     ]
-    for extra in attempts:
-        try:
-            out = subprocess.run(
-                base + extra + ["--", item["url"]],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if out.returncode != 0:
+
+    def try_all(cookies_path):
+        base = [ytdlp, "-j", "--no-warnings"]
+        if cookies_path:
+            base += ["--cookies", cookies_path]
+        for extra in attempts:
+            try:
+                out = subprocess.run(
+                    base + extra + ["--", item["url"]],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if out.returncode != 0:
+                    continue
+                info = json.loads(out.stdout)
+                if isinstance(info, dict):
+                    return info
+            except Exception:
                 continue
-            info = json.loads(out.stdout)
-            if isinstance(info, dict):
-                return info
-        except Exception:
-            continue
-    return None
+        return None
+
+    cookies_path = find_cookies()
+    info = try_all(cookies_path)
+    if info is None and cookies_path:
+        fresh = find_cookies(refresh=True)
+        if fresh and fresh != cookies_path:
+            info = try_all(fresh)
+        if info is None:
+            info = try_all(None)
+    return info
 
 
 def pick_merge_pair(info, cap):
@@ -482,6 +705,17 @@ def pick_merge_pair(info, cap):
     videos.sort(key=lambda t: (t[0], t[1]))
     audios.sort(key=lambda t: t[0])
     return videos[-1][2], audios[-1][1]
+
+
+def find_youtube_item(raw_id):
+    """The saved YouTube item for a /play or /live path tail - accepts
+    the full "youtube:..." id or the bare video id. None if not saved."""
+    item_id = unquote(raw_id or "")
+    with LOCK:
+        for it in load_store(YT_STORE):
+            if it["id"] == item_id or it["id"] == "youtube:" + item_id:
+                return it
+    return None
 
 
 def find_item(item_id):
@@ -565,7 +799,11 @@ best combined stream at or under your pick.</p>
 videos also get an <b>HD merge</b> stream listed first: the app joins
 YouTube's separate picture and sound streams together as it plays. It
 starts slower and seeking is limited; the plain stream stays listed as
-a fallback. Live streams are unaffected.</p>""" % options
+a fallback.</p>
+<p style="color:#999">Live items list a <b>Live relay</b> stream
+first: the app pulls the live feed itself and hands it to Nuvio as one
+continuous stream. Use it if the direct live stream stops after a few
+seconds; the direct stream stays listed second.</p>""" % options
     rows = ""
     for it in links:
         rows += (
@@ -683,6 +921,56 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
+    def _pump_ffmpeg(self, cmd):
+        """Run ffmpeg and stream its stdout to the client as a
+        close-delimited video/mp4 response. Returns False only when
+        ffmpeg could not even be started (the caller then falls back);
+        once the response is being served it returns True - including
+        when the client goes away mid-stream, in which case ffmpeg is
+        killed and reaped either way."""
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            return False
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                while True:
+                    # read1 returns whatever ffmpeg has produced so far
+                    # instead of waiting to fill the whole buffer - so a
+                    # client that goes away is noticed on the next write,
+                    # not a full buffer later.
+                    chunk = proc.stdout.read1(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        finally:
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+        return True
+
     def handle_play(self, raw_id, head_only=False):
         """Serve the HD merge for a saved YouTube item at /play/<id>.
 
@@ -691,13 +979,7 @@ class Handler(BaseHTTPRequestHandler):
         ffmpeg joining the separate picture and sound streams into a
         fragmented MP4 on the fly - no seeking, close-delimited body.
         """
-        item_id = unquote(raw_id or "")
-        item = None
-        with LOCK:
-            for it in load_store(YT_STORE):
-                if it["id"] == item_id or it["id"] == "youtube:" + item_id:
-                    item = it
-                    break
+        item = find_youtube_item(raw_id)
         if not item:
             if head_only:
                 self.send_response(404)
@@ -764,53 +1046,99 @@ class Handler(BaseHTTPRequestHandler):
             "mp4",
             "pipe:1",
         ]
-        try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-            )
-        except Exception:
+        if not self._pump_ffmpeg(cmd):
             fallback()
             return
-        try:
+
+    def handle_live(self, raw_id, head_only=False):
+        """Relay a live YouTube item at /live/<id> as one continuous
+        stream.
+
+        YouTube live playlists only hand out a short window of
+        segments per snapshot and expect the player to keep re-asking;
+        a player that doesn't keep up runs out of video and stops.
+        Here ffmpeg follows the (variant) playlist itself - reloading
+        it as new segments appear - and the client just receives one
+        endless fragmented MP4. Non-live items redirect to their plain
+        resolved stream instead.
+        """
+        item = find_youtube_item(raw_id)
+        if not item:
+            if head_only:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+            else:
+                self.send_json({"error": "not found"}, 404)
+            return
+        if head_only:
             self.send_response(200)
             self.send_header("Content-Type", "video/mp4")
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Connection", "close")
             self.end_headers()
-            self.close_connection = True
-            try:
-                while True:
-                    # read1 returns whatever ffmpeg has produced so far
-                    # instead of waiting to fill the whole buffer - so a
-                    # client that goes away is noticed on the next write,
-                    # not a full buffer later.
-                    chunk = proc.stdout.read1(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        finally:
-            try:
-                proc.wait(timeout=10)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
+            return
+        resolved = resolve_youtube(item)
+        if not resolved:
+            self.send_json({"error": "stream unavailable"}, 404)
+            return
+        if not _is_hls_url(resolved):
+            self.redirect_absolute(resolved)
+            return
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            self.redirect_absolute(resolved)
+            return
+        # Feed ffmpeg the best H.264 variant plus its audio rendition
+        # (two playlists - the variant alone carries no sound) rather
+        # than the master itself, so the -c copy into MP4 stays H.264;
+        # if no variant qualifies (or the playlist can't be read), the
+        # master goes in and ffmpeg picks on its own. The audio in
+        # these playlists is ADTS, which an MP4 can't hold as-is - the
+        # aac_adtstoasc bitstream filter rewrites the headers on the
+        # way through (still a copy, no re-encode).
+        reconnect = [
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_delay_max",
+            "5",
+        ]
+        picked = pick_live_variant(resolved)
+        cmd = [ffmpeg, "-v", "error"] + reconnect
+        if picked:
+            vurl, aurl = picked
+            cmd += ["-i", vurl]
+            if aurl:
+                cmd += reconnect + ["-i", aurl]
+                amap = "1:a:0"
+            else:
+                amap = "0:a:0?"
+            cmd += ["-map", "0:v:0", "-map", amap]
+        else:
+            cmd += ["-i", resolved, "-map", "0:v:0", "-map", "0:a:0?"]
+        cmd += [
+            "-c",
+            "copy",
+            "-bsf:a",
+            "aac_adtstoasc",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]
+        if not self._pump_ffmpeg(cmd):
+            self.redirect_absolute(resolved)
+            return
 
     def do_HEAD(self):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/play/"):
             self.handle_play(parsed.path[len("/play/"):], head_only=True)
+            return
+        if parsed.path.startswith("/live/"):
+            self.handle_live(parsed.path[len("/live/"):], head_only=True)
             return
         self.send_response(404)
         self.send_header("Content-Type", "application/json")
@@ -824,6 +1152,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/play/"):
             self.handle_play(path[len("/play/"):])
+            return
+        if path.startswith("/live/"):
+            self.handle_live(path[len("/live/"):])
             return
         if path == "/manifest.json":
             self.send_json(MANIFEST)
@@ -872,26 +1203,45 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"streams": streams})
                 return
             if item.get("kind") == "youtube":
+                resolved = resolve_youtube(item)
+                plain = None
+                if resolved:
+                    plain = {
+                        "name": "YouTube",
+                        "title": item["name"] + "\nYouTube stream",
+                        "url": resolved,
+                    }
                 streams = []
-                if load_settings()["quality"] in ("1080", "best"):
+                if plain and _is_hls_url(resolved):
+                    # Live: the relay first - the addon follows the
+                    # live playlist itself and feeds the player one
+                    # continuous stream (a player handed the playlist
+                    # directly can run out of segments and stop). The
+                    # plain direct-master stream stays second. The HD
+                    # merge doesn't apply to live at all.
                     streams.append(
                         {
-                            "name": "YouTube HD (merge)",
+                            "name": "YouTube Live (relay)",
                             "title": item["name"]
-                            + "\n1080p merge — app joins picture+sound live",
-                            "url": "http://127.0.0.1:%d/play/%s"
+                            + "\nLive relay — app feeds the stream, plays continuously",
+                            "url": "http://127.0.0.1:%d/live/%s"
                             % (PORT, item["id"]),
                         }
                     )
-                resolved = resolve_youtube(item)
-                if resolved:
-                    streams.append(
-                        {
-                            "name": "YouTube",
-                            "title": item["name"] + "\nYouTube stream",
-                            "url": resolved,
-                        }
-                    )
+                    streams.append(plain)
+                else:
+                    if load_settings()["quality"] in ("1080", "best"):
+                        streams.append(
+                            {
+                                "name": "YouTube HD (merge)",
+                                "title": item["name"]
+                                + "\n1080p merge — app joins picture+sound live",
+                                "url": "http://127.0.0.1:%d/play/%s"
+                                % (PORT, item["id"]),
+                            }
+                        )
+                    if plain:
+                        streams.append(plain)
                 self.send_json({"streams": streams})
                 return
             streams = [
