@@ -172,7 +172,7 @@ DEFAULT_TRACKERS = [
 
 MANIFEST = {
     "id": "community.mymagnetlinks",
-    "version": "1.6.4",
+    "version": "1.6.5",
     "name": "My Magnet Links",
     "description": "Your own pasted magnet links, web video links, YouTube videos and channels, playable in Nuvio.",
     "logo": "",
@@ -404,7 +404,8 @@ def find_ytdlp():
     return None
 
 
-_cookies_cache = {"done": False, "path": None}
+_cookies_cache = {"path": None, "searched_at": 0.0}
+_COOKIES_RETRY_AFTER = 30.0
 
 
 def find_cookies(refresh=False):
@@ -419,11 +420,17 @@ def find_cookies(refresh=False):
     ~/Downloads/Temp/www.youtube.com_cookies.txt,
     ~/Downloads/www.youtube.com_cookies.txt, then any *cookies*.txt in
     ~/Downloads/Temp or ~/Downloads, newest first. The first existing
-    non-empty file wins. The result is cached for the process; pass
-    refresh=True to search again (callers do that once when a fetch
-    fails, in case the file was exported in the meantime)."""
-    if _cookies_cache["done"] and not refresh:
-        return _cookies_cache["path"]
+    non-empty file wins. A found file is cached for the process; a
+    "not found" result is only trusted for ~30 seconds, so a file
+    exported after the addon started is picked up on its own - no
+    restart needed. Pass refresh=True to search again right away
+    (callers do that once when a fetch fails, in case the file was
+    exported in the meantime)."""
+    if not refresh:
+        if _cookies_cache["path"]:
+            return _cookies_cache["path"]
+        if time.time() - _cookies_cache["searched_at"] < _COOKIES_RETRY_AFTER:
+            return None
     downloads = os.path.expanduser("~/Downloads")
     temp = os.path.join(downloads, "Temp")
     candidates = [
@@ -463,7 +470,7 @@ def find_cookies(refresh=False):
         if pool:
             pool.sort(reverse=True)
             found = pool[0][1]
-    _cookies_cache["done"] = True
+    _cookies_cache["searched_at"] = time.time()
     _cookies_cache["path"] = found
     return found
 
@@ -1022,7 +1029,11 @@ def youtube_info(item):
     Default client first, android_vr as the retry. If a cookies file
     was used and both attempts fail, the search runs once more (the
     file may have been exported since) and then both attempts are
-    retried without cookies (exported cookies go stale)."""
+    retried without cookies (exported cookies go stale). If the
+    attempts ran with NO cookies and failed, one fresh cookie search
+    is forced and, when a file turns up, the attempts run once more
+    with it - a file exported after the addon started must not need
+    a restart to take effect."""
     ytdlp = find_ytdlp()
     if not ytdlp:
         return None
@@ -1060,6 +1071,14 @@ def youtube_info(item):
             info = try_all(fresh)
         if info is None:
             info = try_all(None)
+    if info is None and not cookies_path:
+        # The attempts above ran with no cookies at all (the lookup
+        # found no file). The file may have been exported since that
+        # lookup - force one fresh search now, ignoring the "not
+        # found" pause, and retry once with it before giving up.
+        fresh = find_cookies(refresh=True)
+        if fresh:
+            info = try_all(fresh)
     return info
 
 
