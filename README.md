@@ -1,8 +1,8 @@
-# My Magnet Links — a magnet-link addon for Nuvio
+# StreamSearch — a magnet-link and video addon for Nuvio
 
 A tiny addon for [Nuvio](https://nuvio.tv) (it speaks the Stremio addon protocol) that lets you paste your own **magnet links** into Nuvio and play them.
 
-You run it on your own computer. It has a small web page where you paste magnet links; those links then show up inside Nuvio in a catalog called **My Magnet Links**, ready to play. You can also paste a full magnet link straight into Nuvio's search and play it from there.
+You run it on your own computer. It has a small web page where you paste magnet links; those links then show up inside Nuvio in a catalog called **StreamSearch**, ready to play. You can also paste a full magnet link straight into Nuvio's search and play it from there.
 
 Playback is peer-to-peer (direct torrent streaming), so **use a VPN while watching**.
 
@@ -35,12 +35,12 @@ No accounts, no sign-ups, no dependencies — it's a single Python file using on
 
 ## Mac app version
 
-Prefer not to use Terminal? The `mac-app` folder holds the pieces of **My Magnet Links.app**, a small Mac app that runs the same addon — double-click it and it starts the addon in the background and opens the magnet page for you. No Terminal needed.
+Prefer not to use Terminal? The `mac-app` folder holds the pieces of **StreamSearch.app**, a small Mac app that runs the same addon — double-click it and it starts the addon in the background and opens the magnet page for you. No Terminal needed.
 
 The app bundle is put together like this:
 
 ```
-My Magnet Links.app/
+StreamSearch.app/
   Contents/
     Info.plist            (from mac-app/Info.plist)
     MacOS/launcher        (from mac-app/launcher)
@@ -58,13 +58,13 @@ The `/configure` page has one main box at the top: **Paste any link**. Paste a m
 
 1. With the addon running, open the first address it printed (the one ending in `/configure`) in your browser.
 2. Paste your magnet link, give it a name, and save.
-3. In Nuvio, open the **My Magnet Links** row on the home screen, pick your item, and choose the **Magnet** stream.
+3. In Nuvio, open the **StreamSearch** row on the home screen, pick your item, and choose the **Magnet** stream.
 
 Your saved magnets stay saved (in `magnets.json` next to the script) — you only paste each one once. You can delete them from the same configure page.
 
 ## Web video links
 
-You can also play videos straight from a web address. On the same `/configure` page there's a second form, **Web video link**: paste a direct video address (for example an `.mp4`, `.mkv` or `.m3u8` link), give it a name if you like, and save. It appears in the same **My Magnet Links** catalog in Nuvio, and tapping it plays the file straight from the web — no torrent, so no VPN needed for these.
+You can also play videos straight from a web address. On the same `/configure` page there's a second form, **Web video link**: paste a direct video address (for example an `.mp4`, `.mkv` or `.m3u8` link), give it a name if you like, and save. It appears in the same **StreamSearch** catalog in Nuvio, and tapping it plays the file straight from the web — no torrent, so no VPN needed for these.
 
 One catch: the address has to be the video file/stream address itself. A web *page* address (a page that has a player on it) won't work — the addon can only hand Nuvio a direct video address.
 
@@ -72,13 +72,22 @@ Saved web links live in their own file, `links.json`, next to `magnets.json`, an
 
 ## YouTube videos
 
-You can also add YouTube videos — regular videos and live streams. On the same `/configure` page there's a third form, **YouTube link**: paste a YouTube address (`youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/live/...` and similar), give it a name if you like, and save. It appears in the same **My Magnet Links** catalog.
+You can also add YouTube videos — regular videos and live streams. On the same `/configure` page there's a third form, **YouTube link**: paste a YouTube address (`youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/live/...` and similar), give it a name if you like, and save. It appears in the same **StreamSearch** catalog.
 
 When you press play in Nuvio, the addon asks [yt-dlp](https://github.com/yt-dlp/yt-dlp) for the video's stream address at that moment and then serves the video itself — so yt-dlp must be installed on the same computer, and the first play can take a few seconds. Live streams work the same way, through the live relay.
 
 If you add a YouTube video without a name, the addon fills in the video's **real title** automatically (it asks yt-dlp when you save). YouTube items also show the **video's picture** in Nuvio — the catalog and detail pages use the video's own thumbnail as the poster.
 
 Repeat plays start fast: the addon remembers each resolved stream address in memory — for a few hours for regular videos, and for a minute for live streams (their addresses rotate quickly) — so pressing play again skips the lookup. It also asks the fastest-answering source first, which cuts the first-play wait down a lot on networks where only one source answers.
+
+### New in 1.8.12
+
+- **Renamed: the addon is now called StreamSearch.** Same addon, same single file — your saved magnets, links, videos, channels and settings all carry over untouched (the data folder keeps its old name on disk).
+- **Find everything from Nuvio's main-page search.** Paste a magnet link into search and it plays right from the results (1.8.5) and saves itself to your list (1.8.6, no duplicates). Torrent search results show up in search too.
+- **Subscriptions row.** A channels-only Subscriptions row brings together the channels you saved and the channels from your YouTube subscriptions page; tap a channel and its clips load inside, with anything live pinned first. Channel checks are capped, run side by side, and are cached for about 30 minutes, so the row opens fast (the 1.8.4 fix, after it used to time out).
+- **YouTube sign-in without re-exporting cookies.** If the cookies file is missing or has gone stale, the addon reads the sign-in straight from Opera GX (then Opera, Chrome, Safari) so YouTube streams keep working (1.8.7).
+- **Open the configure page from your phone.** The addon also answers on your local network while it runs, so you can open the configure page in your phone's browser on the same network — the configure page shows the address to use (1.8.11).
+- **Seeking that arrives sooner.** Opening a video now starts building its seekable copy right away, before you press play, so replays can jump forward and back without waiting for the whole file (1.8.12). At 720p and under, when YouTube offers a combined picture-and-sound stream, the player is sent straight to it instead.
 
 ### Fix in 1.6.8
 
@@ -146,7 +155,7 @@ Saved YouTube videos live in their own file, `youtube.json`, next to `magnets.js
 
 You can now follow whole YouTube channels, not just single videos. On the `/configure` page there's a fourth form, **YouTube channel link**: paste a channel address (`youtube.com/@channelname`, `youtube.com/channel/UC...`, `youtube.com/c/...` or `youtube.com/user/...` — a tab suffix like `/videos` is fine), give it a name if you like, and save. The one paste box at the top also recognises channel links and files them the same way. A channel's real name fills in automatically when you don't type one.
 
-The channel's **newest 10 uploads** then appear in the same **My Magnet Links** catalog, after your own saved items. In the list, each channel video is labeled with the channel's name — "Channel Name — Video Title" — so it's clear which channel it came from. The addon re-checks each channel about **every 30 minutes** while it runs, so new uploads show up on their own — you don't paste anything else. If a re-check fails, the last good list stays in place rather than the channel's videos vanishing.
+The channel's **newest 10 uploads** then appear in the same **StreamSearch** catalog, after your own saved items. In the list, each channel video is labeled with the channel's name — "Channel Name — Video Title" — so it's clear which channel it came from. The addon re-checks each channel about **every 30 minutes** while it runs, so new uploads show up on their own — you don't paste anything else. If a re-check fails, the last good list stays in place rather than the channel's videos vanishing.
 
 Channel videos play exactly like individually pasted YouTube videos — same quality setting, same HD merge, and if an upload is a live stream it gets the live relay. (The catalog lists a channel's uploads; a channel's *current* live stream lives on its streams tab, so to pin a live channel, add its live video link as a regular YouTube item.)
 
